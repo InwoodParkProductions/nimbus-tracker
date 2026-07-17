@@ -76,6 +76,12 @@ def find_blender():
 
 DEFAULT_BLENDER = find_blender()
 
+# A shot counts as locked-off below this much median feature displacement
+# (px, measured at 1024px wide by shot_motion). Real handheld/dolly work sits
+# well above it — the shot that triggered this being named was ~21px — so the
+# gap between "static" and "moving" is wide and this needs no tuning.
+STATIC_MOTION_PX = 2.0
+
 
 def py_cmd(module):
     """Command prefix to run one of our pipeline modules as a subprocess.
@@ -108,11 +114,21 @@ def parse_args():
     p.add_argument("--focus-distance", help="Camera depth-of-field focus "
                    "distance (scene units) for the final camera.")
     p.add_argument("--static", action="store_true",
-                   help="Treat the shot as locked-off: place a static camera "
-                        "at --start/--rotation instead of solving. Without "
-                        "this flag the shot's motion is measured and the "
-                        "static path is chosen automatically when there is "
-                        "no camera movement.")
+                   help="Hint that the shot is locked-off: place a static "
+                        "camera at --start/--rotation instead of solving. "
+                        "The shot's motion is measured either way, and this "
+                        "hint is refused if the footage clearly moves — pass "
+                        "--force-static to override that check. Without this "
+                        "flag the static path is chosen automatically when "
+                        "there is no camera movement.")
+    p.add_argument("--force-static", action="store_true",
+                   help="Place a static camera even if the shot measures as "
+                        "moving. Escape hatch for footage the motion "
+                        "estimate reads wrong; implies --static.")
+    p.add_argument("--live", action="store_true",
+                   help="Render in a visible Blender window instead of "
+                        "headless, so you can watch frames appear. Costs GPU "
+                        "time and ~0.8GB of VRAM; off by default.")
     p.add_argument("--masking-model", default="best",
                    help="Person-masking model: 'fast' (yolo11n, quick) or "
                         "'best' (yolo11x, detects costumes/unusual figures — "
@@ -156,11 +172,25 @@ def run(cmd, what):
         sys.exit(f"FAILED at: {what} (exit {result.returncode}). See output above.")
 
 
+def render_landed(render_path):
+    """Did stage 4 actually produce output?
+
+    An .mp4 lands at render_path itself, but a PNG sequence lands at
+    "<render_path>_0001.png", "..._0002.png" — render_path never exists as a
+    file. Testing os.path.exists(render_path) therefore marks every
+    SUCCESSFUL png render as a failure, which re-renders the whole shot in
+    Eevee and then reports that rendering did not complete.
+    """
+    if os.path.splitext(render_path)[1]:      # .mp4 and friends: one file
+        return os.path.exists(render_path)
+    return bool(glob.glob(render_path + "_*.png"))
+
+
 def do_render(args, scene_out):
     """Stage 4 with an engine safety net: try the chosen engine, and if
     Cycles can't run on this machine (no GPU/driver, out of memory, …) fall
     back to Eevee so the shot still produces a video. Returns True when the
-    output file landed."""
+    output landed."""
     if not args.render:
         return True
     if not scene_out:
@@ -171,20 +201,24 @@ def do_render(args, scene_out):
     if args.engine.lower() == "cycles":
         engines.append("eevee")
     for eng in engines:
-        # windowed (no -b): you can watch the render happen live in Blender's
-        # own window; render_stage4.py closes it automatically when done.
         # --factory-startup: don't load the user's addons into the render
-        # window (asset-library addons poll servers and slow the render).
-        cmd = [args.blender, "--factory-startup", scene_out,
-               "-P", os.path.join(HERE, "render_stage4.py"), "--",
-               "--out", render_path, "--engine", eng]
+        # (asset-library addons poll servers and slow it down).
+        cmd = [args.blender, "--factory-startup"]
+        if not args.live:
+            # -b (headless) is the right default for a queue: no window, no
+            # GL context, and no render-display buffer — which at 4K is VRAM
+            # the scene needs (measured: 6.6GB headless vs 7.4GB windowed, of
+            # 8GB). --live puts the watch-it-happen window back.
+            cmd.insert(1, "-b")
+        cmd += [scene_out, "-P", os.path.join(HERE, "render_stage4.py"), "--",
+                "--out", render_path, "--engine", eng]
         for flag in ("samples", "percent", "frames"):
             if getattr(args, flag):
                 cmd += ["--" + flag, getattr(args, flag)]
         if args.transparent:
             cmd.append("--transparent")
         if run_ok(cmd, f"Stage 4: rendering ({eng})") and \
-                os.path.exists(render_path):
+                render_landed(render_path):
             return True
         print(f"[warn] render with {eng} failed"
               + (" — trying Eevee" if eng != engines[-1] else ""))
@@ -295,8 +329,8 @@ def main():
         for s in shots:
             m = shot_motion(footage, s["frame_start"], s["frame_end"])
             move = "?" if m is None else f"{m:.1f}"
-            verdict = ("  <- static, can't be 3D-tracked" if m is not None and m < 2.0
-                       else "")
+            verdict = ("  <- static, can't be 3D-tracked"
+                       if m is not None and m < STATIC_MOTION_PX else "")
             print(f"  shot {s['shot']}: frames {s['frame_start']}-{s['frame_end']}"
                   f" ({s['num_frames']} frames), camera motion ~{move} px{verdict}")
         print(f"\nPick a moving shot and re-run with:  --shot N")
@@ -314,18 +348,37 @@ def main():
     # If static placement fails for any reason, fall through to the tracking
     # chain — its own fallbacks guarantee the shot still gets a camera.
     if args.scene:
-        is_static = args.static
-        if not is_static:
-            try:
-                m = shot_motion(footage, shot["frame_start"], shot["frame_end"])
-            except Exception as e:  # can't measure -> assume moving, track it
-                print(f"[warn] motion measurement failed ({e}) — "
-                      "treating the shot as moving")
-                m = None
-            if m is not None and m < 2.0:
-                is_static = True
+        # Measure motion ALWAYS — including when --static was asked for.
+        # A --static hint used to skip this measurement entirely, so a shot
+        # mis-flagged in the UI silently rendered a frozen camera over moving
+        # footage: 769 identical frames, ~21 hours, and a comp that could
+        # never line up. Nothing downstream could catch it either, because
+        # place_static.py reports solve_ok=true. The measurement is a few
+        # seconds; a wrong static call costs a day.
+        try:
+            m = shot_motion(footage, shot["frame_start"], shot["frame_end"])
+        except Exception as e:  # can't measure -> assume moving, track it
+            print(f"[warn] motion measurement failed ({e}) — "
+                  "treating the shot as moving")
+            m = None
+
+        is_static = args.static or args.force_static
+        if m is not None and m < STATIC_MOTION_PX:
+            if not is_static:
                 print(f"\nShot {args.shot} has ~{m:.1f}px of camera motion — "
                       "treating it as a locked-off (static) shot.")
+            is_static = True
+        elif is_static and m is not None and not args.force_static:
+            # The hint disagrees with the footage. Trust the footage.
+            print(f"\n[REFUSED] Shot {args.shot} was flagged static, but it "
+                  f"measures ~{m:.1f}px of camera motion "
+                  f"(static is < {STATIC_MOTION_PX}px).")
+            print("          A static camera here would render one frozen "
+                  "image over a moving plate — the CG would slide against "
+                  "the background and the comp would not hold.")
+            print("          Tracking it instead. Pass --force-static if the "
+                  "measurement is wrong for this shot.")
+            is_static = False
         if is_static:
             scene = os.path.abspath(args.scene)
             base = os.path.splitext(os.path.basename(scene))[0]
@@ -348,13 +401,28 @@ def main():
                 place += ["--render-size", f"{source_size[0]}x{source_size[1]}"]
             if run_ok(place, "Static shot: placing locked-off camera") and \
                     os.path.exists(scene_out):
+                # One frame is the whole render. The camera is locked and
+                # nothing in the scene animates, so every frame of a static
+                # shot is the same image — rendering the full range just
+                # writes that image N times. Hold the single frame for the
+                # shot's length in the comp instead.
+                if args.render:
+                    n = shot["num_frames"]
+                    if args.frames and args.frames != "1-1":
+                        print(f"[info] static shot: ignoring --frames "
+                              f"{args.frames}; one frame is all there is")
+                    args.frames = "1-1"
+                    print(f"[info] static shot: rendering 1 frame instead of "
+                          f"{n} identical ones")
                 do_render(args, scene_out)
                 print("\n=== DONE ===")
                 print(f"Work folder:     {workdir}")
                 print("Solve:           locked-off static camera (no motion)")
                 print(f"Your scene:      {scene_out}  (camera: TrackedCamera)")
                 if args.render:
-                    print(f"Render:          {os.path.abspath(args.render)}")
+                    print(f"Render:          {os.path.abspath(args.render)}"
+                          f"  (single frame — hold it for "
+                          f"{shot['num_frames']} frames)")
                 print_timing_summary()
                 return
             print("[warn] static placement failed — falling back to the "

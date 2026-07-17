@@ -95,8 +95,15 @@ def main():
                 prefs.get_devices()
                 gpus = [d for d in prefs.devices if d.type != 'CPU']
                 if gpus:
+                    # GPU only. Enabling the CPU as well looks like free
+                    # throughput but backfires on a laptop: the CPU and GPU
+                    # share one power/thermal budget, so the CPU's cores eat
+                    # the watts the GPU needed and the GPU downclocks to a
+                    # fraction of its cap. Measured on an m16 R1 (4070 +
+                    # i7-13700HX): 34W/65% util hybrid vs 66W/96% GPU-only.
+                    # The image is the same either way.
                     for d in prefs.devices:
-                        d.use = True
+                        d.use = (d.type != 'CPU')
                     scene.cycles.device = 'GPU'
                     gpu_type = dev_type
                     print(f"[stage4] Cycles on GPU ({dev_type}: "
@@ -107,23 +114,21 @@ def main():
         # Denoising is the hidden render killer: scenes default to
         # OpenImageDenoise on the CPU, which at 4K takes 20-30 SECONDS per
         # frame — far longer than the render itself at draft samples. Move
-        # it to the GPU (OptiX on NVIDIA, or GPU OIDN elsewhere).
+        # it to the GPU, but keep whichever denoiser the .blend asked for.
+        # OptiX and OpenImageDenoise are different algorithms with visibly
+        # different output (OptiX goes waxy on fine detail), so swapping to
+        # OptiX for speed silently re-grades every shot the artist already
+        # approved — and makes new shots not match ones already rendered.
         c = scene.cycles
         if getattr(c, "use_denoising", False):
             denoise_dev = "CPU"
-            if gpu_type in ("OPTIX", "CUDA"):
-                try:
-                    c.denoiser = 'OPTIX'
-                    denoise_dev = "GPU (OptiX)"
-                except TypeError:
-                    pass
-            if denoise_dev == "CPU" and gpu_type:
+            if gpu_type:
                 try:
                     c.denoising_use_gpu = True
-                    denoise_dev = "GPU (OIDN)"
+                    denoise_dev = "GPU"
                 except (AttributeError, TypeError):
                     pass
-            print(f"[stage4] denoising on {denoise_dev}")
+            print(f"[stage4] denoising with {c.denoiser} on {denoise_dev}")
         # keep BVH/textures resident between frames — free speedup for
         # animation renders (the scene doesn't rebuild every frame)
         try:
@@ -178,6 +183,12 @@ def main():
             r.image_settings.media_type = 'IMAGE'
         r.image_settings.file_format = 'PNG'
         r.image_settings.color_mode = 'RGBA' if a["transparent"] else 'RGB'
+        # What makes a sequence resumable: re-running a shot after a crash or
+        # a power cut skips every frame already on disk instead of starting
+        # over at frame 1. Delete a frame's .png to force it to re-render.
+        # (An .mp4 can't do this — H.264 has no resume, so an interrupted
+        # video render costs the whole shot.)
+        r.use_overwrite = False
     r.filepath = out if ext else out + "_"
 
     print(f"[stage4] Rendering frames {scene.frame_start}-{scene.frame_end} "
