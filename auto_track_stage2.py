@@ -467,8 +467,14 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
         # blew past the tripod threshold and shipped a 2.75px ROTATION-ONLY
         # solve instead of the working 3D one that was already in hand.
         #
-        # So: if the solve is already inside the "good" band, leave it alone.
-        clean_above = settings.get("clean_if_error_above", 3.0)
+        # So: only clean a solve we would otherwise REJECT. Below the tripod
+        # threshold the solve is usable as-is, and cleaning it is all risk and
+        # no reward — measured on shot 06, a usable 3.82px solve was cleaned
+        # into 131.78px of coplanar garbage. Above the threshold the pre-clean
+        # solve was headed for the fallback chain anyway, so a failed rescue
+        # loses nothing.
+        clean_above = settings.get("clean_if_error_above",
+                                   settings.get("tripod_fallback_error", 8.0))
         if err > clean_above:
             keep_min = settings.get("keep_min_tracks", 12)
             tracks = clip.tracking.tracks
@@ -480,11 +486,19 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
             if doomed:
                 delete_selected_tracks_only(tracks, doomed)
                 new_err = try_solve("perspective (cleaned)")
-                if new_err is not None and new_err > err:
+                if new_err is None:
+                    print("[stage2] cleaning destroyed the solve; the pruned "
+                          "tracks are gone — continuing to the fallback chain")
+                elif new_err > err:
                     print(f"[stage2] cleaning made it worse "
                           f"({err:.2f} -> {new_err:.2f} px); the pruned tracks "
                           "are gone, so that is what we have")
-                err = new_err if new_err is not None else err
+                # The re-solve REPLACED the reconstruction in the file — the
+                # old one no longer exists, so its error must not be reported.
+                # Keeping the old number here shipped a file holding 131.78px
+                # of garbage while the log said 3.82px GOOD (same bug as the
+                # tripod-restore path, third occurrence).
+                err = new_err
         else:
             print(f"[stage2] solve is {err:.2f} px — skipping the clean pass "
                   f"(only runs above {clean_above:g} px)")
