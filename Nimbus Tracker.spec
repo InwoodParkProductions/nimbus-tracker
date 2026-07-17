@@ -3,7 +3,14 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('template.blend', '.'), ('aero_bg.svg', '.'), ('nimbus_bg.jpg', '.'), ('nagai_bg.svg', '.'), ('nimbus.ico', '.'), ('yolo11n-seg.pt', '.'), ('yolo11x-seg.pt', '.'), ('sam2.1_s.pt', '.'), ('auto_track_stage1.py', '.'), ('auto_track_stage2.py', '.'), ('apply_track_stage3.py', '.'), ('render_stage4.py', '.'), ('preview_track.py', '.'), ('export_setup.py', '.'), ('blender_setup.py', '.'), ('place_static.py', '.'), ('export_camera.py', '.'), ('static', 'static')]
 binaries = []
+# Pipeline modules are launched as subprocesses via `exe --run <module>`, which
+# runpy-imports them by name — PyInstaller cannot see that statically, so every
+# one must be listed here or the frozen app fails the moment it reaches that
+# stage. cotrack_points is the learned tracking front-end; without it the
+# packaged app silently falls back to the classic detect+KLT path on every shot
+# (the fallback is deliberate, but it should not be triggered by a build gap).
 hiddenimports = ['ui', 'auto_track', 'split_shots', 'segment_people', 'flow_solve',
+                 'cotrack_points', 'torch', 'torchvision',
                  'webview', 'webview.platforms.edgechromium',
                  'webview.platforms.winforms',
                  'clr', 'clr_loader', 'pythonnet']
