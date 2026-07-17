@@ -25,6 +25,16 @@ from datetime import datetime
 
 import numpy as np
 
+# Line-buffer stdout. When output goes to a pipe or a log file (the render
+# queue, or any batch run) Python block-buffers it, so if this process is
+# killed — or hangs — everything printed so far is lost with the buffer.
+# A stuck Ceres solve produced a 1.2MB log of its own C++ stderr and not one
+# line of ours, which made the hang undiagnosable from the log alone.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 
 def get_cli_args():
     argv = sys.argv

@@ -50,6 +50,15 @@ def parse_args():
                         "invariant and this keeps VRAM sane)")
     p.add_argument("--spacing", type=int, default=12,
                    help="grid spacing in px at --width (default 12)")
+    p.add_argument("--max-tracks", type=int, default=200,
+                   help="cap on tracks handed to the solver (default 200). "
+                        "More is not better: every track is 3 more unknowns in "
+                        "the bundle, and on a rotation-dominant shot (no "
+                        "parallax) those points are unconstrained. 478 tracks "
+                        "on a 34-frame pan left Blender's Ceres solver "
+                        "thrashing on infinite-cost steps for 8.5 hours. "
+                        "~150-200 well-spread tracks solve better AND faster; "
+                        "the cap keeps them spread rather than clumped.")
     p.add_argument("--max-frames", type=int, default=4000,
                    help="refuse shots longer than this (default 4000). The "
                         "online model streams in a fixed-size window so VRAM "
@@ -195,6 +204,37 @@ def main():
           f"(of {tr.shape[1]} seeded)")
     if not keep:
         sys.exit("no usable background tracks")
+
+    if len(keep) > a.max_tracks:
+        # Thin to max_tracks, keeping them SPREAD across the frame. A solve
+        # wants coverage, not count: tracks clumped in one corner constrain
+        # the camera far worse than the same number spread wide, and every
+        # extra track is 3 more unknowns in an already-degenerate bundle.
+        # Stratify by seed cell, then prefer the longest-lived in each.
+        cells = {}
+        gx = max(1, int(np.ceil(np.sqrt(a.max_tracks * W / max(H, 1)))))
+        gy = max(1, int(np.ceil(a.max_tracks / gx)))
+        for i in keep:
+            x, y = pts[i]
+            cell = (min(gx - 1, x * gx // W), min(gy - 1, y * gy // H))
+            cells.setdefault(cell, []).append(i)
+        for c in cells:
+            cells[c].sort(key=lambda i: -int(vv[:, i].sum()))  # longest first
+        thinned, r = [], 0
+        while len(thinned) < a.max_tracks:
+            added = False
+            for c in sorted(cells):
+                if r < len(cells[c]):
+                    thinned.append(cells[c][r])
+                    added = True
+                    if len(thinned) >= a.max_tracks:
+                        break
+            if not added:
+                break
+            r += 1
+        print(f"[cotrack] thinned {len(keep)} -> {len(thinned)} tracks across "
+              f"{len(cells)} cells (cap {a.max_tracks})")
+        keep = thinned
 
     out = {"num_frames": T, "seed_frame": seed_f, "proc_size": [W, H],
            "tracks": []}
