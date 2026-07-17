@@ -24,7 +24,8 @@ from flask import Flask, request, redirect, send_file, abort, jsonify
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from auto_track import find_blender, py_cmd  # noqa: E402
+from auto_track import (find_blender, py_cmd, render_landed,  # noqa: E402
+                        STATIC_MOTION_PX)
 
 BLENDER = None  # resolved after settings helpers are defined (see below)
 # starting folder for file dialogs; falls back to Videos/home elsewhere
@@ -273,6 +274,21 @@ def workdir_for(footage):
     return os.path.join(os.path.dirname(footage), base + "_autotrack")
 
 
+def flag(value):
+    """Read a checkbox/flag out of a query string or form.
+
+    Never use bool() for this. Query and form values arrive as STRINGS, and
+    bool("0") is True — which is not a hypothetical: the setup page emits
+    "&static=0" for a moving shot, that string round-tripped back into
+    bool(request.args.get("static")), came back True, and the page re-emitted
+    the shot as static=1. A moving shot was then rendered with a locked-off
+    camera: 769 identical frames, ~21 hours, and a comp that could not hold.
+    """
+    if value is None:
+        return False
+    return str(value).strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def videos_dir():
     """The user's Videos folder (standard render destination)."""
     v = os.path.join(os.path.expanduser("~"), "Videos")
@@ -459,7 +475,10 @@ def _run_tracked_proc(cmd, entry, watch_stages=True,
                 else:
                     queue_state["spf"] = (time.time() - t0) / max(done, 1)
         proc.wait()
-        ok = proc.returncode == 0 and os.path.exists(entry["render"])
+        # render_landed, not os.path.exists: a PNG sequence lands at
+        # "<render>_0001.png", so entry["render"] itself never exists and a
+        # successful sequence would be scored a failure.
+        ok = proc.returncode == 0 and render_landed(entry["render"])
         if ok:
             set_prog(1.0)
         return ok
@@ -1321,7 +1340,7 @@ def shots_page():
     n_untracked_moving = 0
     for s in shots:
         m = motion.get(s["shot"])
-        static = m is not None and m < 2.0
+        static = m is not None and m < STATIC_MOTION_PX
         n_track += 0 if static else 1
         motion_badge = ('<span class="badge bad">static</span>' if static
                         else f'<span class="badge ok">motion {m} px</span>')
@@ -1468,7 +1487,7 @@ def track_form():
     pre_percent = str(prof.get("percent") or st.get("last_percent", "100"))
     pre_transparent = bool(prof.get("transparent"))
     have_render = bool(prof.get("engine"))
-    is_static = bool(request.args.get("static"))
+    is_static = flag(request.args.get("static"))
     placed = request.args.get("placed")
     render_summary = (f'{pre_engine} · {pre_samples} samples · {pre_percent}%'
                       + (' · transparent' if pre_transparent else ''))
@@ -1629,7 +1648,7 @@ def track():
 
     # Static shot: no solve — just place a locked-off camera at the chosen
     # pose over the shot's frame range.
-    if f.get("static"):
+    if flag(f.get("static")):
         shot = int(f["shot"])
         if not scene0 or not os.path.exists(scene0):
             return page('<div class="card">A static shot needs a scene '
@@ -1684,7 +1703,7 @@ def track():
             "engine": f.get("engine", "eevee"),
             "samples": f.get("samples", "64"),
             "percent": f.get("percent", "100"),
-            "transparent": bool(f.get("transparent")),
+            "transparent": flag(f.get("transparent")),
             "rendered": False}
     remember_last(scene, f)  # prefill these next time
     started = start_job(cmd, "track", meta)
@@ -1726,7 +1745,7 @@ def _run_static_place(footage, shot, scene, f):
     meta = {"footage": footage, "shot": shot, "scene": scene,
             "render": render, "engine": f.get("engine", "eevee"),
             "samples": f.get("samples", "64"), "percent": f.get("percent", "100"),
-            "transparent": bool(f.get("transparent")), "rendered": False,
+            "transparent": flag(f.get("transparent")), "rendered": False,
             "static": True}
     if not start_job(cmd, "track", meta):
         return page('<div class="card">Another job is already running — '
@@ -2749,11 +2768,11 @@ def queue_add():
                     'to the render queue.<div class="actions">'
                     '<a href="javascript:history.back()"><button class="ghost">'
                     'Back</button></a></div></div>')
-    static = bool(f.get("static"))
+    static = flag(f.get("static"))
     engine = f.get("engine", "eevee")
     samples = f.get("samples", "64")
     percent = f.get("percent", "100")
-    transparent = bool(f.get("transparent"))
+    transparent = flag(f.get("transparent"))
     # persist the shared scene profile so the other shots in this clip reuse it
     prof = load_scene_profile(footage)
     prof.update(scene=scene, engine=engine, samples=samples, percent=percent,
