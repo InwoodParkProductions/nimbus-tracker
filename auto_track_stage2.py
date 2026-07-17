@@ -94,6 +94,35 @@ def setup_clip(footage_path):
     return bpy.data.movieclips[-1]
 
 
+def tracks_from_points(clip, points_json, stats):
+    """Build clip tracks from cotrack_points.py output instead of detecting
+    and KLT-tracking them here.
+
+    Only the front-end changes: the solve chain below is untouched and gets
+    the same thing it always got — a clip full of tracks with per-frame
+    markers. Coordinates in the json are already normalized with a bottom-left
+    origin, which is marker.co's convention, so they drop straight in at any
+    clip resolution.
+    """
+    with open(points_json) as f:
+        data = json.load(f)
+    fs = clip.frame_start
+    n_marks = 0
+    for i, pts in enumerate(data["tracks"]):
+        tr = clip.tracking.tracks.new(name=f"ct_{i:04d}", frame=fs)
+        # .new() seeds a marker at `frame`; overwrite/extend it per frame
+        for t, (x, y, visible) in enumerate(pts):
+            mk = tr.markers.insert_frame(fs + t, co=(x, y))
+            mk.mute = not visible
+            n_marks += 1
+    stats["markers_detected"] = len(data["tracks"])
+    stats["front_end"] = "cotracker"
+    stats["cotracker_seed_frame"] = data.get("seed_frame")
+    print(f"[stage2] cotracker front-end: {len(data['tracks'])} tracks, "
+          f"{n_marks} markers from {os.path.basename(points_json)}")
+    return len(data["tracks"])
+
+
 def get_clip_editor_context(clip):
     for window in bpy.context.window_manager.windows:
         screen = window.screen
@@ -185,6 +214,122 @@ class NoSolveError(Exception):
     """Shot has no recoverable camera information — report, don't crash."""
 
 
+def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
+                      clean_error, min_live_markers):
+    """The solve chain, shared by both front-ends.
+
+    Extracted verbatim so the classic detect+KLT path and the cotracker
+    path solve identically — the front-end is the only variable. Must be
+    called inside the clip-editor temp_override; `ts` is
+    clip.tracking.settings, which the tripod/keyframe fallbacks mutate.
+    """
+    if mask_stack:
+        mute_person_markers(
+            clip, mask_stack, min_live_markers, stats,
+            max_person_fraction=settings.get("max_person_fraction", 0.35))
+        bpy.ops.clip.select_all(action='SELECT')
+
+    min_solved = settings.get("min_solved_tracks", 5)
+
+    def try_solve(label):
+        """Solve; return average error or None. solve_camera RAISES on
+        shots it can't reconstruct (pans, flat backdrops) — never let
+        that kill the pipeline. Degenerate 'solves' (NaN error, or fewer
+        than min_solved contributing tracks) are rejected: a 1-track
+        0.00px tripod solve is noise, not a camera path."""
+        bpy.ops.clip.select_all(action='SELECT')
+        try:
+            bpy.ops.clip.solve_camera()
+        except Exception as e:
+            print(f"[stage2] {label} solve failed: {e}")
+            return None
+        rec = clip.tracking.reconstruction
+        err = rec.average_error if rec.is_valid else None
+        if err is not None and err != err:  # NaN
+            print(f"[stage2] {label} solve rejected: NaN error")
+            return None
+        n_solved = sum(1 for t in clip.tracking.tracks
+                       if t.average_error > 0)
+        stats["solved_tracks"] = n_solved
+        if err is not None and n_solved < min_solved:
+            print(f"[stage2] {label} solve rejected: only {n_solved} "
+                  f"contributing tracks (min {min_solved})")
+            return None
+        print(f"[stage2] {label} solve: "
+              f"{'%.2f px' % err if err is not None else 'invalid'} "
+              f"({n_solved} tracks)")
+        return err
+
+    err = try_solve("perspective")
+    stats["solve_mode"] = "perspective"
+
+    if err is not None:
+        # Clean-and-resolve, capped so we always keep enough survivors
+        keep_min = settings.get("keep_min_tracks", 12)
+        tracks = clip.tracking.tracks
+        solved = sorted((t for t in tracks if t.average_error > 0),
+                        key=lambda t: t.average_error, reverse=True)
+        max_deletable = max(0, len(solved) - keep_min)
+        doomed = [t for t in solved if t.average_error > clean_error][:max_deletable]
+        if doomed:
+            delete_selected_tracks_only(tracks, doomed)
+            new_err = try_solve("perspective (cleaned)")
+            err = new_err if new_err is not None else err
+
+    tripod_at = settings.get("tripod_fallback_error", 8.0)
+
+    # Manual-keyframe retry: automatic keyframe selection often reports
+    # "no good keyframes" on short shots. Pick the best-covered frame in
+    # each half of the shot and solve between those.
+    if err is None or err > tripod_at:
+        def marker_count(f):
+            return sum(1 for t in clip.tracking.tracks
+                       if (m := t.markers.find_frame(f)) and not m.mute)
+        half = fs + fd // 2
+        ka = max(range(fs, half), key=marker_count, default=fs)
+        kb = max(range(half, fs + fd), key=marker_count, default=fs + fd - 1)
+        if kb > ka:
+            ts.use_keyframe_selection = False
+            obj = clip.tracking.objects.active
+            obj.keyframe_a = ka
+            obj.keyframe_b = kb
+            merr = try_solve(f"perspective (manual keyframes {ka}-{kb})")
+            if merr is not None and (err is None or merr < err):
+                err = merr
+                stats["solve_mode"] = "perspective"
+                stats["manual_keyframes"] = [ka, kb]
+
+    # Tripod fallback: pans/rotations have no parallax, so the full 3D
+    # solve fails or produces garbage — a rotation-only solve is the
+    # correct model for those shots.
+    if err is None or err > tripod_at:
+        ts.use_tripod_solver = True
+        terr = try_solve("tripod (rotation-only)")
+        if terr is not None and (err is None or terr < err):
+            stats["solve_mode"] = "tripod"
+            err = terr
+        elif err is not None:
+            ts.use_tripod_solver = False
+            try_solve("perspective (restored)")
+
+    # Quality ceiling: a "solve" with tens of pixels of error is worse
+    # than no solve — it would place CG confidently in the wrong place.
+    max_err = settings.get("max_acceptable_error", 20.0)
+    if err is not None and err > max_err:
+        print(f"[stage2] best solve {err:.2f}px exceeds {max_err}px "
+              "ceiling — reporting no usable solve")
+        stats["no_solve_reason"] = (f"best achievable solve was "
+                                    f"{err:.1f}px — too inaccurate to use")
+        err = None
+
+    # what run_tracking actually vouches for (reconstruction.is_valid can
+    # be true even for solves we rejected as degenerate)
+    stats["accepted_error"] = err
+    if err is None:
+        stats["solve_mode"] = None
+    return clip
+
+
 def run_tracking(clip, mask_stack=None, settings=None, stats=None):
     settings = settings or {}
     stats = stats if stats is not None else {}
@@ -233,9 +378,26 @@ def run_tracking(clip, mask_stack=None, settings=None, stats=None):
             "No CLIP_EDITOR area found. Run from template.blend (see README)."
         )
 
+    points_json = settings.get("points_json")
+
     with bpy.context.temp_override(**ctx):
         fs = clip.frame_start
         fd = clip.frame_duration
+
+        if points_json:
+            # Learned front-end: tracks come in pre-made from cotrack_points.py
+            # (background-seeded, tracked through blur). Skip detection and
+            # KLT entirely; everything from mute_person_markers down is shared.
+            n = tracks_from_points(clip, points_json, stats)
+            if n < 8:
+                raise NoSolveError(
+                    f"cotracker returned only {n} background tracks — the "
+                    "visible background is too small or too occluded to solve.")
+            stats["detect_frame"] = stats.get("cotracker_seed_frame")
+            stats["detect_threshold_used"] = None
+            return _solve_and_finish(clip, ts, mask_stack, settings, stats,
+                                     fs, fd, clean_error, min_live_markers)
+
         # Frame 1 is often the WORST frame to detect on (motion blur, person
         # filling frame). Try several frames; tracking is bidirectional so a
         # mid-shot detect frame works fine.
@@ -295,112 +457,8 @@ def run_tracking(clip, mask_stack=None, settings=None, stats=None):
         bpy.context.scene.frame_set(detect_frame)
         bpy.ops.clip.track_markers(backwards=True, sequence=True)
 
-        if mask_stack:
-            mute_person_markers(
-                clip, mask_stack, min_live_markers, stats,
-                max_person_fraction=settings.get("max_person_fraction", 0.35))
-            bpy.ops.clip.select_all(action='SELECT')
-
-        min_solved = settings.get("min_solved_tracks", 5)
-
-        def try_solve(label):
-            """Solve; return average error or None. solve_camera RAISES on
-            shots it can't reconstruct (pans, flat backdrops) — never let
-            that kill the pipeline. Degenerate 'solves' (NaN error, or fewer
-            than min_solved contributing tracks) are rejected: a 1-track
-            0.00px tripod solve is noise, not a camera path."""
-            bpy.ops.clip.select_all(action='SELECT')
-            try:
-                bpy.ops.clip.solve_camera()
-            except Exception as e:
-                print(f"[stage2] {label} solve failed: {e}")
-                return None
-            rec = clip.tracking.reconstruction
-            err = rec.average_error if rec.is_valid else None
-            if err is not None and err != err:  # NaN
-                print(f"[stage2] {label} solve rejected: NaN error")
-                return None
-            n_solved = sum(1 for t in clip.tracking.tracks
-                           if t.average_error > 0)
-            stats["solved_tracks"] = n_solved
-            if err is not None and n_solved < min_solved:
-                print(f"[stage2] {label} solve rejected: only {n_solved} "
-                      f"contributing tracks (min {min_solved})")
-                return None
-            print(f"[stage2] {label} solve: "
-                  f"{'%.2f px' % err if err is not None else 'invalid'} "
-                  f"({n_solved} tracks)")
-            return err
-
-        err = try_solve("perspective")
-        stats["solve_mode"] = "perspective"
-
-        if err is not None:
-            # Clean-and-resolve, capped so we always keep enough survivors
-            keep_min = settings.get("keep_min_tracks", 12)
-            tracks = clip.tracking.tracks
-            solved = sorted((t for t in tracks if t.average_error > 0),
-                            key=lambda t: t.average_error, reverse=True)
-            max_deletable = max(0, len(solved) - keep_min)
-            doomed = [t for t in solved if t.average_error > clean_error][:max_deletable]
-            if doomed:
-                delete_selected_tracks_only(tracks, doomed)
-                new_err = try_solve("perspective (cleaned)")
-                err = new_err if new_err is not None else err
-
-        tripod_at = settings.get("tripod_fallback_error", 8.0)
-
-        # Manual-keyframe retry: automatic keyframe selection often reports
-        # "no good keyframes" on short shots. Pick the best-covered frame in
-        # each half of the shot and solve between those.
-        if err is None or err > tripod_at:
-            def marker_count(f):
-                return sum(1 for t in clip.tracking.tracks
-                           if (m := t.markers.find_frame(f)) and not m.mute)
-            half = fs + fd // 2
-            ka = max(range(fs, half), key=marker_count, default=fs)
-            kb = max(range(half, fs + fd), key=marker_count, default=fs + fd - 1)
-            if kb > ka:
-                ts.use_keyframe_selection = False
-                obj = clip.tracking.objects.active
-                obj.keyframe_a = ka
-                obj.keyframe_b = kb
-                merr = try_solve(f"perspective (manual keyframes {ka}-{kb})")
-                if merr is not None and (err is None or merr < err):
-                    err = merr
-                    stats["solve_mode"] = "perspective"
-                    stats["manual_keyframes"] = [ka, kb]
-
-        # Tripod fallback: pans/rotations have no parallax, so the full 3D
-        # solve fails or produces garbage — a rotation-only solve is the
-        # correct model for those shots.
-        if err is None or err > tripod_at:
-            ts.use_tripod_solver = True
-            terr = try_solve("tripod (rotation-only)")
-            if terr is not None and (err is None or terr < err):
-                stats["solve_mode"] = "tripod"
-                err = terr
-            elif err is not None:
-                ts.use_tripod_solver = False
-                try_solve("perspective (restored)")
-
-        # Quality ceiling: a "solve" with tens of pixels of error is worse
-        # than no solve — it would place CG confidently in the wrong place.
-        max_err = settings.get("max_acceptable_error", 20.0)
-        if err is not None and err > max_err:
-            print(f"[stage2] best solve {err:.2f}px exceeds {max_err}px "
-                  "ceiling — reporting no usable solve")
-            stats["no_solve_reason"] = (f"best achievable solve was "
-                                        f"{err:.1f}px — too inaccurate to use")
-            err = None
-
-        # what run_tracking actually vouches for (reconstruction.is_valid can
-        # be true even for solves we rejected as degenerate)
-        stats["accepted_error"] = err
-        if err is None:
-            stats["solve_mode"] = None
-
-    return clip
+        return _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
+                                 clean_error, min_live_markers)
 
 
 def collect_metrics(clip, stats):
