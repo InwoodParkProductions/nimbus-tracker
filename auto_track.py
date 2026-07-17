@@ -653,6 +653,22 @@ def main():
               "to the 2D motion match")
     mode = metrics.get("solve_mode", "perspective")
     tracked_blend = os.path.join(out_dir, tag + "_masked_tracked.blend")
+
+    # ---- QC overlay: see the solve, don't just read its number -------------
+    # Reprojects the solved bundles over the footage (distortion-aware) next
+    # to the tracked markers: dots riding their crosses = locked; sliding =
+    # drift. Best-effort — a failed QC render never blocks the shot.
+    if err is not None and os.path.exists(tracked_blend):
+        qc_dir = os.path.join(out_dir, tag + "_qc")
+        solve_json = os.path.join(qc_dir, "solve.json")
+        os.makedirs(qc_dir, exist_ok=True)
+        if run_ok([args.blender, "-b", tracked_blend, "-P",
+                   os.path.join(HERE, "dump_solve.py"), "--", solve_json],
+                  "QC: dumping solve", timeout=args.stage_timeout)                 and run_ok(py_cmd("qc_render") + [shot_file, solve_json,
+                                                  qc_dir],
+                           "QC: rendering overlay",
+                           timeout=args.stage_timeout):
+            print(f"QC overlay:      {os.path.join(qc_dir, 'qc.mp4')}")
     flow_json = None
     # A 3D solve worse than this jitters too much to trust; treat it as a
     # failure and hand the shot to the best-effort 2D motion match instead —

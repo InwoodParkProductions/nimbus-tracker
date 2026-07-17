@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('template.blend', '.'), ('aero_bg.svg', '.'), ('nimbus_bg.jpg', '.'), ('nagai_bg.svg', '.'), ('nimbus.ico', '.'), ('yolo11n-seg.pt', '.'), ('yolo11x-seg.pt', '.'), ('sam2.1_s.pt', '.'), ('auto_track_stage1.py', '.'), ('auto_track_stage2.py', '.'), ('apply_track_stage3.py', '.'), ('render_stage4.py', '.'), ('preview_track.py', '.'), ('export_setup.py', '.'), ('blender_setup.py', '.'), ('place_static.py', '.'), ('export_camera.py', '.'), ('static', 'static')]
+datas = [('template.blend', '.'), ('aero_bg.svg', '.'), ('nimbus_bg.jpg', '.'), ('nagai_bg.svg', '.'), ('nimbus.ico', '.'), ('yolo11n-seg.pt', '.'), ('yolo11x-seg.pt', '.'), ('sam2.1_s.pt', '.'), ('auto_track_stage1.py', '.'), ('auto_track_stage2.py', '.'), ('apply_track_stage3.py', '.'), ('render_stage4.py', '.'), ('preview_track.py', '.'), ('export_setup.py', '.'), ('blender_setup.py', '.'), ('place_static.py', '.'), ('dump_solve.py', '.'), ('export_camera.py', '.'), ('static', 'static')]
 binaries = []
 # Pipeline modules are launched as subprocesses via `exe --run <module>`, which
 # runpy-imports them by name — PyInstaller cannot see that statically, so every
@@ -10,7 +10,7 @@ binaries = []
 # packaged app silently falls back to the classic detect+KLT path on every shot
 # (the fallback is deliberate, but it should not be triggered by a build gap).
 hiddenimports = ['ui', 'auto_track', 'split_shots', 'segment_people', 'flow_solve',
-                 'cotrack_points', 'matte_people', 'comp_stage5',
+                 'cotrack_points', 'matte_people', 'comp_stage5', 'qc_render',
                  'torch', 'torchvision',
                  'webview', 'webview.platforms.edgechromium',
                  'webview.platforms.winforms',
