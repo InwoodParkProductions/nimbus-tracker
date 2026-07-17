@@ -144,6 +144,50 @@ def tracks_from_points(clip, points_json, stats):
     return n_tracks
 
 
+def solve_geometry(clip):
+    """Is the reconstruction geometrically meaningful, or just low-error?
+
+    Reprojection error only says the solve fits the 2D tracks. It says nothing
+    about whether the 3D structure is real, and on this app's actual footage —
+    greenscreen plates where the actors are masked out and the only trackable
+    points are on a FLAT cloth backdrop — it routinely isn't:
+
+        shot 09: 1.32px error, but the bundles' principal extents are
+                 145613 / 692 / 409 — a needle, not a scene.
+        shot 19: 2.38px error, bundles at 285,000,000 units — points shoved
+                 to infinity, which is what a near-rotation camera does when
+                 asked for a 3D solve it cannot support.
+
+    A plane cannot constrain depth: with no parallax the solver is free to put
+    points anywhere along each ray and still reproject them perfectly. The
+    honest model for those shots is a rotation-only (tripod) solve.
+
+    Returns (flatness, depth_ratio):
+      flatness    3rd/1st principal extent of the bundles. ~0 = coplanar.
+      depth_ratio median point distance / camera baseline. Huge = points at
+                  infinity relative to how far the camera actually moved, so
+                  triangulation had nothing to work with.
+    """
+    pts = np.array([list(t.bundle) for t in clip.tracking.tracks
+                    if t.has_bundle])
+    if len(pts) < 8:
+        return None, None
+    s = np.linalg.svd(pts - pts.mean(axis=0), compute_uv=False)
+    flatness = float(s[2] / s[0]) if s[0] > 0 else 0.0
+    depth_ratio = None
+    try:
+        cams = np.array([list(c.matrix.to_translation())
+                         for c in clip.tracking.reconstruction.cameras])
+        if len(cams) >= 2:
+            baseline = float(np.linalg.norm(cams.max(axis=0) - cams.min(axis=0)))
+            dist = float(np.median(np.linalg.norm(pts - cams.mean(axis=0),
+                                                  axis=1)))
+            depth_ratio = dist / baseline if baseline > 1e-9 else float("inf")
+    except Exception:
+        pass
+    return flatness, depth_ratio
+
+
 def get_clip_editor_context(clip):
     for window in bpy.context.window_manager.windows:
         screen = window.screen
@@ -289,6 +333,30 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
             print(f"[stage2] {label} solve rejected: only {n_solved} "
                   f"contributing tracks (min {min_solved})")
             return None
+        # Geometry check, on EVERY perspective attempt. Reprojection error
+        # only says the solve fits the 2D tracks; it says nothing about
+        # whether the 3D structure is real. On a flat backdrop it routinely
+        # is not, and a degenerate solve bakes a confidently wrong camera
+        # move into the user's scene. Tripod solves are exempt: they claim no
+        # 3D structure, so there is none to be wrong.
+        if err is not None and not ts.use_tripod_solver:
+            flat, depth = solve_geometry(clip)
+            stats["bundle_flatness"] = flat
+            stats["bundle_depth_ratio"] = depth
+            flat_at = settings.get("planar_flatness_below", 0.02)
+            depth_at = settings.get("infinite_depth_ratio_above", 1000.0)
+            why = None
+            if flat is not None and flat < flat_at:
+                why = (f"bundles coplanar (flatness {flat:.4f} < {flat_at}) "
+                       "— a flat backdrop cannot constrain depth")
+            elif depth is not None and depth > depth_at:
+                why = (f"bundles {depth:.0f}x further than the camera moved "
+                       "— points at infinity, nothing was triangulated")
+            if why:
+                print(f"[stage2] {label} solve rejected: {err:.2f}px but "
+                      f"geometrically degenerate — {why}")
+                stats["degenerate_reason"] = why
+                return None
         print(f"[stage2] {label} solve: "
               f"{'%.2f px' % err if err is not None else 'invalid'} "
               f"({n_solved} tracks)")
