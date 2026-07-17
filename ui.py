@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from auto_track import (find_blender, py_cmd, render_landed,  # noqa: E402
                         STATIC_MOTION_PX)
+from split_shots import shot_file_for  # noqa: E402
 
 BLENDER = None  # resolved after settings helpers are defined (see below)
 # starting folder for file dialogs; falls back to Videos/home elsewhere
@@ -1739,7 +1740,7 @@ def _run_static_place(footage, shot, scene, f):
     base = os.path.splitext(os.path.basename(scene))[0]
     scene_out = os.path.join(wd, f"{tag}_{base}_tracked.blend")
     out_log = os.path.join(wd, tag + "_out", tag + "_masked_track_log.json")
-    shot_file = os.path.join(wd, "shots", f"shot_{shot:02d}.mp4")
+    shot_file = shot_file_for(os.path.join(wd, "shots"), shot)
     sj = os.path.join(wd, "shots", "shots.json")
     frames, source_size = 1, None
     if os.path.exists(sj):
@@ -1827,7 +1828,7 @@ def blender_setup():
     wd = workdir_for(footage)
     os.makedirs(wd, exist_ok=True)
     frame_png = os.path.join(wd, tag + "_frame1.png")
-    shot_file = os.path.join(wd, "shots", f"shot_{shot:02d}.mp4")
+    shot_file = shot_file_for(os.path.join(wd, "shots"), shot)
     cap = cv2.VideoCapture(shot_file if os.path.exists(shot_file) else footage)
     ok, img = cap.read()
     cap.release()
@@ -2380,7 +2381,7 @@ def preview():
         d = json.load(fp)
     out = os.path.join(out_dir, tag + "_preview.mp4")
     if d.get("flow_json"):
-        shot_file = os.path.join(wd, "shots", "shot_01.mp4")
+        shot_file = shot_file_for(os.path.join(wd, "shots"), 1)
         cmd = [BLENDER, "-b", "-P", os.path.join(HERE, "preview_track.py"),
                "--", "--flow", d["flow_json"], "--footage", shot_file,
                "--out", out]
@@ -2631,8 +2632,7 @@ def plate_frame():
     footage = request.args.get("footage", "")
     shot = int(request.args.get("shot", 1))
     frame = max(1, int(request.args.get("frame", 1)))
-    shot_file = os.path.join(workdir_for(footage), "shots",
-                             f"shot_{shot:02d}.mp4")
+    shot_file = shot_file_for(os.path.join(workdir_for(footage), "shots"), shot)
     if not os.path.exists(shot_file):
         abort(404)
     cap = cv2.VideoCapture(shot_file)

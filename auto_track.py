@@ -31,6 +31,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+from split_shots import shot_file_for  # noqa: E402
+
 
 def find_blender():
     """Locate blender.exe across the places it commonly installs, so the app
@@ -339,7 +341,7 @@ def main():
     shot = next((s for s in shots if s["shot"] == args.shot), None)
     if shot is None:
         sys.exit(f"No shot {args.shot}; footage has shots 1-{len(shots)}")
-    shot_file = shot.get("file") or os.path.join(shots_dir, f"shot_{args.shot:02d}.mp4")
+    shot_file = shot.get("file") or shot_file_for(shots_dir, args.shot)
     tag = f"shot_{args.shot:02d}"
 
     # ---- First decision: does the camera move at all? ----
