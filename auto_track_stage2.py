@@ -108,19 +108,30 @@ def tracks_from_points(clip, points_json, stats):
         data = json.load(f)
     fs = clip.frame_start
     n_marks = 0
+    n_tracks = 0
     for i, pts in enumerate(data["tracks"]):
-        tr = clip.tracking.tracks.new(name=f"ct_{i:04d}", frame=fs)
-        # .new() seeds a marker at `frame`; overwrite/extend it per frame
-        for t, (x, y, visible) in enumerate(pts):
-            mk = tr.markers.insert_frame(fs + t, co=(x, y))
-            mk.mute = not visible
+        # Insert markers ONLY on frames where the point is visible — never a
+        # muted marker. mute_person_markers reads a pre-muted marker as
+        # "this frame was inside a person mask" (it's how the KLT path passes
+        # that information along), so muting for OCCLUSION here gets counted
+        # as person-contact. On shots where people cover 57-71% of frame that
+        # pushed every track past the "lives on a person" threshold and
+        # deleted all of them: shot 09 went 152 tracks -> 0, shot 10 -> 1.
+        # A gap in a track is expressed by the marker's absence.
+        vis = [(t, x, y) for t, (x, y, v) in enumerate(pts) if v]
+        if len(vis) < 2:
+            continue
+        tr = clip.tracking.tracks.new(name=f"ct_{i:04d}", frame=fs + vis[0][0])
+        for t, x, y in vis:
+            tr.markers.insert_frame(fs + t, co=(x, y))
             n_marks += 1
-    stats["markers_detected"] = len(data["tracks"])
+        n_tracks += 1
+    stats["markers_detected"] = n_tracks
     stats["front_end"] = "cotracker"
     stats["cotracker_seed_frame"] = data.get("seed_frame")
-    print(f"[stage2] cotracker front-end: {len(data['tracks'])} tracks, "
+    print(f"[stage2] cotracker front-end: {n_tracks} tracks, "
           f"{n_marks} markers from {os.path.basename(points_json)}")
-    return len(data["tracks"])
+    return n_tracks
 
 
 def get_clip_editor_context(clip):
@@ -247,6 +258,19 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
         err = rec.average_error if rec.is_valid else None
         if err is not None and err != err:  # NaN
             print(f"[stage2] {label} solve rejected: NaN error")
+            return None
+        # A near-zero error is a collapsed solve, not a perfect one. Real
+        # footage never reconstructs below ~0.01px — 8.7e-10px is a nanometre
+        # on the sensor. It means the solver found a trivial solution (all
+        # points effectively coplanar / at infinity / the camera not moving),
+        # which reports as EXCELLENT (production-grade) on the quality scale
+        # below and then puts CG confidently nowhere. min_solved doesn't catch
+        # it: shot 06 collapsed to 8.7e-10px with 48 contributing tracks.
+        min_believable = settings.get("min_believable_error", 1e-3)
+        if err is not None and err < min_believable:
+            print(f"[stage2] {label} solve rejected: {err:.2e} px is a "
+                  f"collapse, not a solve (nothing real solves below "
+                  f"{min_believable:g} px)")
             return None
         n_solved = sum(1 for t in clip.tracking.tracks
                        if t.average_error > 0)

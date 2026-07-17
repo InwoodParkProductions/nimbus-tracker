@@ -50,13 +50,15 @@ def parse_args():
                         "invariant and this keeps VRAM sane)")
     p.add_argument("--spacing", type=int, default=12,
                    help="grid spacing in px at --width (default 12)")
-    p.add_argument("--max-frames", type=int, default=400,
-                   help="refuse shots longer than this (default 400). The "
-                        "offline model holds the whole clip in VRAM, and a "
-                        "windowed pass would break tracks across window "
-                        "boundaries — which is exactly what the solver needs "
-                        "to span its two keyframes. Caller falls back to the "
-                        "classic front-end.")
+    p.add_argument("--max-frames", type=int, default=4000,
+                   help="refuse shots longer than this (default 4000). The "
+                        "online model streams in a fixed-size window so VRAM "
+                        "does not grow with shot length; this is just a "
+                        "sanity bound.")
+    p.add_argument("--offline", action="store_true",
+                   help="use the offline model (slightly better, but holds "
+                        "the WHOLE clip in VRAM — 335 frames already OOMs an "
+                        "8GB card, so this is short shots only)")
     p.add_argument("--device", default="cuda")
     return p.parse_args()
 
@@ -124,19 +126,49 @@ def main():
           f"{100*bg.mean():.0f}% background, {len(pts)} points seeded")
 
     dev = a.device if (a.device != "cuda" or torch.cuda.device_count()) else "cpu"
-    model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline",
-                           trust_repo=True).to(dev)
     # queries are (t, x, y) with t the frame the point is seeded on
     q = torch.tensor([[float(seed_f - 1), float(x), float(y)] for x, y in pts],
                      dtype=torch.float32, device=dev)[None]
-    vid = torch.tensor(np.stack(frames), device=dev).permute(0, 3, 1, 2)[None].float()
-    with torch.no_grad():
-        tracks, vis = model(vid, queries=q)
+    # Video stays on the CPU: at 512x214 a 1395-frame shot is ~1.8GB on its
+    # own, before the model allocates anything.
+    vid_cpu = torch.tensor(np.stack(frames)).permute(0, 3, 1, 2)[None].float()
+
+    if a.offline:
+        model = torch.hub.load("facebookresearch/co-tracker",
+                               "cotracker3_offline", trust_repo=True).to(dev)
+        with torch.no_grad():
+            tracks, vis = model(vid_cpu.to(dev), queries=q)
+    else:
+        # Online model: fixed-size sliding window, so VRAM is flat in shot
+        # length. The offline model holds the entire clip at once and OOMs an
+        # 8GB card at 335 frames — measured, on shots 01/06/10 of this project
+        # (which is to say: on most real shots).
+        model = torch.hub.load("facebookresearch/co-tracker",
+                               "cotracker3_online", trust_repo=True).to(dev)
+        step = model.step
+        with torch.no_grad():
+            model(video_chunk=vid_cpu[:, :step * 2].to(dev),
+                  is_first_step=True, queries=q)
+            tracks = vis = None
+            for i in range(0, max(1, T - step), step):
+                chunk = vid_cpu[:, i:i + step * 2].to(dev)
+                if chunk.shape[1] < 2:
+                    break
+                out = model(video_chunk=chunk)
+                if out[0] is not None:
+                    tracks, vis = out
+            if tracks is None:
+                sys.exit("online tracker returned nothing")
     tr = tracks[0].cpu().numpy()          # (T, N, 2) in processing px
     vv = (vis[0].cpu().numpy() > 0.5)     # (T, N)
-    del vid, tracks, vis
+    # The online model reports on the frames it has consumed, which can lag
+    # the clip by less than one window; clamp so indexing below is safe.
+    T = min(T, tr.shape[0])
+    del vid_cpu, tracks, vis
     if dev == "cuda":
         torch.cuda.empty_cache()
+    print(f"[cotrack] tracked {tr.shape[0]} frames, {tr.shape[1]} points "
+          f"({'offline' if a.offline else 'online/streaming'})")
 
     # Drop points that wander onto a person: the whole point is a background
     # solve, and a marker riding a moving actor is worse than no marker.
