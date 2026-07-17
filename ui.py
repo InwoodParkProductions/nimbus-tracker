@@ -300,8 +300,27 @@ def videos_dir():
 
 
 def default_render_path(footage, shot, suffix=""):
+    """Where a shot renders when the user doesn't name a path.
+
+    A PNG sequence in a folder of its own — deliberately not an .mp4.
+    Rendering straight to video means an interrupted render loses the entire
+    shot (H.264 has no resume), which on a 20-hour render is the difference
+    between losing a frame and losing a day. It also re-compresses every
+    frame on the way out. Stage 4 writes "<this>_0001.png" and skips frames
+    already on disk, so a crash or a power cut costs one frame. Encode to
+    video once at the end, from the PNGs.
+    """
     stem = os.path.splitext(os.path.basename(footage))[0].replace(" ", "_")
-    return os.path.join(videos_dir(), f"{stem}_shot_{shot:02d}{suffix}.mp4")
+    name = f"{stem}_shot_{shot:02d}{suffix}"
+    return os.path.join(videos_dir(), name, name)
+
+
+def default_export_path(footage, shot, ext):
+    """Camera-export path (.abc/.fbx). Separate from default_render_path so
+    the export doesn't have to strip an extension off a render path that no
+    longer has one."""
+    stem = os.path.splitext(os.path.basename(footage))[0].replace(" ", "_")
+    return os.path.join(videos_dir(), f"{stem}_shot_{shot:02d}_camera.{ext}")
 
 
 def _shot_frames(footage, shot):
@@ -1579,10 +1598,10 @@ def track_form():
   </div>
   <p class="hint" style="margin-top:2px">Leave <b>Lens</b> blank to let the
   solver estimate focal length; set it to a known lens (e.g. 35) to lock it.</p>
-  <label>Render output file (automatic if empty)</label>
+  <label>Render output (automatic if empty)</label>
   <div class="browserow">
     <input type="text" name="render" id="render"
-        placeholder="automatic — saves to your Videos folder">
+        placeholder="automatic — PNG sequence in its own folder under Videos">
     <button type="button" class="browse"
         onclick="pick('render_save','render')">{I_FOLDER} Browse</button>
   </div>
@@ -3009,8 +3028,7 @@ def export_camera():
                     '<a href="javascript:history.back()"><button class="ghost">'
                     'Back</button></a></div></div>')
     ext = "abc" if fmt == "abc" else "fbx"
-    out = default_render_path(footage, shot, "_camera").rsplit(".", 1)[0] \
-        + "." + ext
+    out = default_export_path(footage, shot, ext)
     r = subprocess.run([BLENDER, "-b", scene_out, "-P",
                         os.path.join(HERE, "export_camera.py"), "--",
                         "--out", out, "--format", ext],
