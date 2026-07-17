@@ -144,6 +144,79 @@ def tracks_from_points(clip, points_json, stats):
     return n_tracks
 
 
+def _fit_homography(p0, p1):
+    """Least-squares homography p0 -> p1 by DLT. Points are Nx2."""
+    n = len(p0)
+    A = np.zeros((2 * n, 9))
+    A[0::2, 0:2] = p0
+    A[0::2, 2] = 1
+    A[0::2, 6:8] = -p0 * p1[:, 0:1]
+    A[0::2, 8] = -p1[:, 0]
+    A[1::2, 3:5] = p0
+    A[1::2, 5] = 1
+    A[1::2, 6:8] = -p0 * p1[:, 1:2]
+    A[1::2, 8] = -p1[:, 1]
+    _, _, Vt = np.linalg.svd(A)
+    H = Vt[-1].reshape(3, 3)
+    return H / H[2, 2] if abs(H[2, 2]) > 1e-12 else H
+
+
+def _homography_inlier_ratio(p0, p1, thresh, iters=120, seed=0):
+    """RANSAC: what fraction of the motion a single homography explains."""
+    if len(p0) < 8:
+        return None
+    rng = np.random.default_rng(seed)
+    best = 0.0
+    for _ in range(iters):
+        idx = rng.choice(len(p0), 4, replace=False)
+        try:
+            H = _fit_homography(p0[idx], p1[idx])
+        except np.linalg.LinAlgError:
+            continue
+        ph = np.c_[p0, np.ones(len(p0))] @ H.T
+        w = ph[:, 2]
+        ok = np.abs(w) > 1e-9
+        if ok.sum() < 8:
+            continue
+        proj = ph[ok, :2] / w[ok, None]
+        err = np.linalg.norm(proj - p1[ok], axis=1)
+        best = max(best, float((err < thresh).sum()) / len(p0))
+    return best
+
+
+def scene_is_planar(clip, fs, fd, thresh_px=2.0):
+    """Does ONE homography explain the whole frame-to-frame motion?
+
+    This is the model-selection question real matchmove software asks before
+    trusting a 3D solve. A homography exactly describes two cases: the scene is
+    a plane, or the camera only rotates. In both, a perspective solve has no
+    parallax to triangulate from — it will still drive reprojection error to
+    zero by placing points at arbitrary depths, which is how a 0.05px "solve"
+    on 14 tracks happens and then reports as EXCELLENT.
+
+    This app's footage is exactly that case: greenscreen plates where the
+    actors are masked out and every trackable point is on a flat backdrop.
+
+    Returns the RANSAC inlier ratio at two well-separated frames, or None.
+    ~1.0 means planar/rotation-only; a scene with real depth has points a
+    single homography cannot explain.
+    """
+    a, b = fs, fs + max(1, fd - 1)
+    mid = fs + fd // 2
+    for fb in (b, mid):
+        p0, p1 = [], []
+        for t in clip.tracking.tracks:
+            m0 = t.markers.find_frame(a, exact=True)
+            m1 = t.markers.find_frame(fb, exact=True)
+            if m0 and m1 and not m0.mute and not m1.mute:
+                p0.append((m0.co[0] * clip.size[0], m0.co[1] * clip.size[1]))
+                p1.append((m1.co[0] * clip.size[0], m1.co[1] * clip.size[1]))
+        if len(p0) >= 8:
+            return _homography_inlier_ratio(np.array(p0), np.array(p1),
+                                            thresh_px)
+    return None
+
+
 def solve_geometry(clip):
     """Is the reconstruction geometrically meaningful, or just low-error?
 
@@ -295,6 +368,10 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
         bpy.ops.clip.select_all(action='SELECT')
 
     min_solved = settings.get("min_solved_tracks", 5)
+    # Computed once, lazily, on the first perspective validation: the
+    # frame-to-frame track geometry doesn't change between solve attempts.
+    # [None] = not yet computed; store the result (which may itself be None).
+    _planar_cache = []
 
     def try_solve(label):
         """Solve; return average error or None. solve_camera RAISES on
@@ -345,8 +422,21 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
             stats["bundle_depth_ratio"] = depth
             flat_at = settings.get("planar_flatness_below", 0.02)
             depth_at = settings.get("infinite_depth_ratio_above", 1000.0)
+            planar_at = settings.get("homography_inlier_above", 0.90)
             why = None
-            if flat is not None and flat < flat_at:
+            # Homography test FIRST: it looks at the 2D tracks directly, so it
+            # catches the planar/rotation case even when the solver scattered
+            # the bundles to fake depth (which defeats the flatness check —
+            # shot 06 slipped through at 0.05px on 14 scattered points).
+            if not _planar_cache:
+                _planar_cache.append(scene_is_planar(clip, fs, fd))
+                stats["homography_inlier_ratio"] = _planar_cache[0]
+            planar = _planar_cache[0]
+            if planar is not None and planar > planar_at:
+                why = (f"one homography explains {planar:.0%} of the motion "
+                       "— the scene is planar or the camera only rotates, so "
+                       "there is no parallax for a 3D solve")
+            elif flat is not None and flat < flat_at:
                 why = (f"bundles coplanar (flatness {flat:.4f} < {flat_at}) "
                        "— a flat backdrop cannot constrain depth")
             elif depth is not None and depth > depth_at:
