@@ -663,6 +663,25 @@ def run_tracking(clip, mask_stack=None, settings=None, stats=None):
 
     if "focal_length_mm" in settings:
         clip.tracking.camera.focal_length = settings["focal_length_mm"]
+    # Distortion model choice. POLYNOMIAL (k1,k2,k3 = 3 free radial params) is
+    # Blender's default and the loosest — on soft footage the solver soaks
+    # tracking residual into it and returns non-physical lenses (k1=-1.63
+    # measured, ~5x beyond any real lens), which then forces the comp to warp
+    # CG far outside its rendered frame. DIVISION has 2 params and bounds the
+    # overfit. Settable per solve via settings["distortion_model"].
+    # Default DIVISION, measured on shot 19 (learned tracks, same attempt):
+    #   POLYNOMIAL  2.38px  k1=-0.32..-1.63 across runs (non-physical, unstable)
+    #   DIVISION    2.47px  div_k1=0.31 (a plausible lens, ~65px corner warp)
+    #   no refine   2.61px
+    # The 3-param polynomial buys 0.1px by soaking residual into a fantasy
+    # lens, which then forces the comp to warp CG hundreds of px past its
+    # frame. The 2-param division model is stable and physical at the cost of
+    # nothing that matters.
+    dm = settings.get("distortion_model", "DIVISION")
+    try:
+        clip.tracking.camera.distortion_model = dm
+    except Exception as e:
+        print(f"[stage2] distortion model {dm!r} not available: {e}")
     if "sensor_width_mm" in settings:
         clip.tracking.camera.sensor_width = settings["sensor_width_mm"]
     ts = clip.tracking.settings

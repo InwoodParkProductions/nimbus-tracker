@@ -78,11 +78,15 @@ def build_distort_map(solve_json, cw, ch):
     Returns (mapx, mapy, max_shift_px) or None when there's no distortion.
     """
     d = json.load(open(solve_json))
-    if d.get("distortion_model", "POLYNOMIAL") != "POLYNOMIAL":
-        print("[comp] non-polynomial distortion model — CG left unwarped")
+    model = d.get("distortion_model", "POLYNOMIAL")
+    if model == "DIVISION":
+        ks = [d.get("division_k1", 0.0), d.get("division_k2", 0.0)]
+    elif model == "POLYNOMIAL":
+        ks = [d.get("k1", 0.0), d.get("k2", 0.0), d.get("k3", 0.0)]
+    else:
+        print(f"[comp] {model} distortion not supported — CG left unwarped")
         return None
-    k1, k2, k3 = d.get("k1", 0.0), d.get("k2", 0.0), d.get("k3", 0.0)
-    if abs(k1) < 1e-9 and abs(k2) < 1e-9 and abs(k3) < 1e-9:
+    if all(abs(k) < 1e-9 for k in ks):
         return None
     clip_w, clip_h = d["clip_size"]
     f_px = d["lens_mm"] / d["sensor_mm"] * cw
@@ -95,12 +99,48 @@ def build_distort_map(solve_json, cw, ch):
     yd = ((ch - ppy) - V) / f_px
     rd = np.sqrt(xd * xd + yd * yd)
 
-    ru = rd.copy()                       # Newton: solve ru*s(ru^2) = rd
-    for _ in range(10):
+    def fwd(ru):
+        """distorted radius as a function of undistorted radius."""
         r2 = ru * ru
-        s = 1.0 + k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3
-        ds = 1.0 + 3 * k1 * r2 + 5 * k2 * r2 ** 2 + 7 * k3 * r2 ** 3
-        ru = ru - (ru * s - rd) / np.where(np.abs(ds) < 1e-9, 1e-9, ds)
+        if model == "DIVISION":
+            return ru / (1.0 + ks[0] * r2 + ks[1] * r2 ** 2)
+        return ru * (1.0 + ks[0] * r2 + ks[1] * r2 ** 2 + ks[2] * r2 ** 3)
+
+    # Invert on a 1D radius table, marching outward from the centre. The
+    # model is radial, so this is exact — and it is the only robust way:
+    # overfit solves FOLD (fwd stops being monotonic), and 2D Newton then
+    # either runs away (a 14-million-px "shift", observed) or converges to
+    # the fold's far branch, which passes a residual check while sampling
+    # garbage (an 8977px "shift", also observed). Marching from zero keeps
+    # every root on the near branch and finds the exact radius where the
+    # model stops being invertible; beyond it the map falls back to identity
+    # and says so.
+    rd_max = float(rd.max())
+    n_tab = 4096
+    ru_step = rd_max * 2.0 / n_tab
+    ru_tab = [0.0]
+    rd_tab = [0.0]
+    ru_cur, rd_fold = 0.0, None
+    while rd_tab[-1] < rd_max:
+        ru_nxt = ru_cur + ru_step
+        rd_nxt = float(fwd(np.array([ru_nxt]))[0])
+        if rd_nxt <= rd_tab[-1] or not np.isfinite(rd_nxt):
+            rd_fold = rd_tab[-1]        # fwd turned over: fold reached
+            break
+        ru_tab.append(ru_nxt)
+        rd_tab.append(rd_nxt)
+        ru_cur = ru_nxt
+        if ru_cur > rd_max * 4.0:       # sampling absurdly far outside CG
+            rd_fold = rd_tab[-1]
+            break
+    ru = np.interp(rd, rd_tab, ru_tab)
+    bad = np.zeros_like(rd, dtype=bool)
+    if rd_fold is not None:
+        bad = rd > rd_fold
+        print(f"[comp] distortion model folds at r={rd_fold:.3f} "
+              f"(frame corner r={rd_max:.3f}) — {100.0 * bad.mean():.1f}% "
+              "of pixels beyond it are left unwarped (overfit solve)")
+    ru = np.where(bad, rd, ru)
     scale = np.where(rd > 1e-12, ru / np.where(rd > 1e-12, rd, 1.0), 1.0)
     xu, yu = xd * scale, yd * scale
 
@@ -108,12 +148,13 @@ def build_distort_map(solve_json, cw, ch):
     mapx = (cw / 2.0 + f_px * xu).astype(np.float32)
     mapy = (ch / 2.0 - f_px * yu).astype(np.float32)
     shift = float(np.max(np.hypot(mapx - U, mapy - V)))
-    # residual of the inversion (roundtrip): should be tiny
-    r2 = ru * ru
-    resid = float(np.max(np.abs(ru * (1 + k1 * r2 + k2 * r2 ** 2
-                                      + k3 * r2 ** 3) - rd))) * f_px
+    # residual of the inversion (roundtrip) on the invertible pixels
+    if (~bad).any():
+        resid = float(np.max(np.abs(fwd(ru) - rd)[~bad])) * f_px
+    else:
+        resid = 0.0
     print(f"[comp] CG distortion-matched to the solve "
-          f"(k1={k1:.3f}) — max shift {shift:.1f}px, "
+          f"({model} {[round(k, 4) for k in ks]}) — max shift {shift:.1f}px, "
           f"inversion residual {resid:.3f}px")
     return mapx, mapy, shift
 
