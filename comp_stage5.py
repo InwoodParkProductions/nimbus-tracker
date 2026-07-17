@@ -259,6 +259,38 @@ def main():
     if writer is not None:
         writer.release()
         print(f"[comp] preview: {os.path.join(args.out_dir, 'preview.mp4')}")
+    # Always-viewable still: plate over comp for the first/mid/last composited
+    # frame. The preview.mp4 uses mp4v, which the browser-based UI (WebView2)
+    # won't decode; a PNG contact sheet opens anywhere and is enough to judge
+    # the composite at a glance.
+    comps = sorted(glob.glob(os.path.join(args.out_dir, "comp_*.png")))
+    if comps:
+        picks = [comps[0], comps[len(comps) // 2], comps[-1]]
+        rows = []
+        for cp in picks:
+            rel = int(re.search(r"_(\d{4})\.png$", cp).group(1))
+            src_f = a + rel - 1
+            cc = cv2.imread(cp)
+            cap2 = cv2.VideoCapture(args.footage)
+            cap2.set(cv2.CAP_PROP_POS_FRAMES, src_f - 1)
+            okp, pl = cap2.read()
+            cap2.release()
+            tw = 620
+            th = round(cc.shape[0] * tw / cc.shape[1]); th -= th % 2
+            comp_t = cv2.resize(cc, (tw, th))
+            cv2.putText(comp_t, f"COMP f{rel}", (8, 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            if okp:
+                plate_t = cv2.resize(pl, (tw, th))
+                cv2.putText(plate_t, "plate", (8, 26),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+            else:
+                plate_t = np.zeros((th, tw, 3), np.uint8)
+            rows.append(np.hstack([plate_t, comp_t]))
+        cv2.imwrite(os.path.join(args.out_dir, "comp_sheet.png"),
+                    np.vstack(rows))
+        print(f"[comp] contact sheet: "
+              f"{os.path.join(args.out_dir, 'comp_sheet.png')}")
     print(f"[comp] {n_done} frames -> {args.out_dir}")
     if n_done == 0:
         sys.exit("no frames composited")
