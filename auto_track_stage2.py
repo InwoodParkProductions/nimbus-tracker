@@ -340,12 +340,47 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
     # "no good keyframes" on short shots. Pick the best-covered frame in
     # each half of the shot and solve between those.
     if err is None or err > tripod_at:
-        def marker_count(f):
-            return sum(1 for t in clip.tracking.tracks
-                       if (m := t.markers.find_frame(f)) and not m.mute)
-        half = fs + fd // 2
-        ka = max(range(fs, half), key=marker_count, default=fs)
-        kb = max(range(half, fs + fd), key=marker_count, default=fs + fd - 1)
+        # Pick the pair of frames sharing the most tracks, not the best-covered
+        # frame in each half independently. Triangulation needs tracks visible
+        # on BOTH keyframes; two frames can each be crowded with markers and
+        # share almost none, which is exactly what happens on a long shot as
+        # the camera moves off everything it started on. Shot 10 (1395 frames)
+        # picked keyframes 1 and 1037 that way and could not reconstruct.
+        #
+        # find_frame defaults to exact=False, which returns the NEAREST marker
+        # — a track whose markers stop at frame 100 answers "yes, present" for
+        # frame 700. Coverage counted that way is fiction; exact=True.
+        def live_at(f):
+            names = set()
+            for t in clip.tracking.tracks:
+                m = t.markers.find_frame(f, exact=True)
+                if m and not m.mute:
+                    names.add(t.name)
+            return names
+
+        cands = sorted({int(f) for f in np.linspace(fs, fs + fd - 1,
+                                                    min(12, max(2, fd)))})
+        live = {f: live_at(f) for f in cands}
+        min_sep = max(2, fd // 10)   # need baseline for parallax
+        best = None
+        for i, fa in enumerate(cands):
+            for fb in cands[i + 1:]:
+                if fb - fa < min_sep:
+                    continue
+                n = len(live[fa] & live[fb])
+                if best is None or n > best[0]:
+                    best = (n, fa, fb)
+        if best and best[0] >= 8:
+            _, ka, kb = best
+            print(f"[stage2] keyframes {ka}-{kb} share {best[0]} tracks "
+                  f"(best of {len(cands)} candidate frames)")
+        else:
+            half = fs + fd // 2
+            ka, kb = fs, max(fs + 1, fs + fd - 1)
+            if best:
+                print(f"[stage2] no frame pair shares 8+ tracks (best "
+                      f"{best[0]}) — a 3D solve needs common tracks on two "
+                      f"keyframes; falling back to the full range")
         if kb > ka:
             ts.use_keyframe_selection = False
             obj = clip.tracking.objects.active

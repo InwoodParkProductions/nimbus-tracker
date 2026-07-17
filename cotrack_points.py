@@ -50,6 +50,19 @@ def parse_args():
                         "invariant and this keeps VRAM sane)")
     p.add_argument("--spacing", type=int, default=12,
                    help="grid spacing in px at --width (default 12)")
+    p.add_argument("--seeds", type=int, default=1,
+                   help="frames across the shot to seed points on "
+                        "(default 1). Re-seeding SHOULD help long shots — "
+                        "seeding only frame 1 means the camera moves off "
+                        "everything it started on. It measurably does not: "
+                        "on shot 10 (1395 frames) 4 seeds took survivors "
+                        "183 -> 947 and keyframe-shared tracks 15 -> 41, "
+                        "and the solve went from 5.87px to 295px (no "
+                        "solve). More shared tracks, worse answer — the "
+                        "extra tracks are seeded at different times and "
+                        "appear to poison the bundle. Kept for "
+                        "experimentation; do not raise without re-running "
+                        "the A/B.")
     p.add_argument("--max-tracks", type=int, default=200,
                    help="cap on tracks handed to the solver (default 200). "
                         "More is not better: every track is 3 more unknowns in "
@@ -86,18 +99,39 @@ def load_mask(masks_dir, frame_no, w, h):
     return cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST) > 127
 
 
-def pick_seed_frame(masks_dir, n_frames, w, h):
-    """Seed where the most background is visible. Frame 1 is often the worst
-    (person entering, filling frame) — the classic detector has the same
-    problem and sweeps candidate frames for the same reason."""
-    if not masks_dir:
-        return 1
-    best, best_bg = 1, -1.0
-    for f in np.linspace(1, n_frames, min(8, n_frames)).astype(int):
-        bg = 1.0 - load_mask(masks_dir, int(f), w, h).mean()
-        if bg > best_bg:
-            best, best_bg = int(f), bg
-    return best
+def pick_seed_frames(masks_dir, n_frames, w, h, n_seeds):
+    """Frames to seed points on, spread across the shot.
+
+    Seeding only frame 1 is fine for a short shot and useless for a long one:
+    the camera moves off everything it started on, so tracks die and no two
+    keyframes share enough of them to triangulate. Shot 10 (1395 frames) kept
+    183 tracks of which only 15 were common to the best keyframe pair — not
+    enough for a 3D solve. Re-seeding across the shot keeps live tracks
+    everywhere on the timeline.
+
+    Within each segment, prefer the frame with the most visible background —
+    frame 1 is often the worst (a person entering, filling frame), which is
+    why the classic detector sweeps candidate frames too.
+    """
+    n_seeds = max(1, min(n_seeds, max(1, n_frames // 8)))
+    if n_frames <= 1:
+        return [1]
+    # segment the shot, then pick the most-background frame inside each
+    edges = np.linspace(1, n_frames + 1, n_seeds + 1).astype(int)
+    seeds = []
+    for i in range(n_seeds):
+        lo, hi = int(edges[i]), max(int(edges[i]) + 1, int(edges[i + 1]))
+        cands = np.linspace(lo, hi - 1, min(5, hi - lo)).astype(int)
+        if not masks_dir:
+            seeds.append(int(cands[0]))
+            continue
+        best, best_bg = int(cands[0]), -1.0
+        for f in cands:
+            bg = 1.0 - load_mask(masks_dir, int(f), w, h).mean()
+            if bg > best_bg:
+                best, best_bg = int(f), bg
+        seeds.append(best)
+    return sorted(set(seeds))
 
 
 def main():
@@ -122,21 +156,29 @@ def main():
     if T > a.max_frames:
         sys.exit(f"shot is {T} frames (> --max-frames {a.max_frames})")
 
-    seed_f = pick_seed_frame(a.masks, T, W, H)
-    person = load_mask(a.masks, seed_f, W, H)
-    bg = ~person
+    seed_frames = pick_seed_frames(a.masks, T, W, H, a.seeds)
     m = a.spacing
     ys, xs = np.mgrid[m:H - m:a.spacing, m:W - m:a.spacing]
-    pts = [(int(x), int(y)) for x, y in zip(xs.ravel(), ys.ravel()) if bg[y, x]]
+    pts, seed_of = [], []
+    for sf in seed_frames:
+        bg = ~load_mask(a.masks, sf, W, H)
+        n0 = len(pts)
+        for x, y in zip(xs.ravel(), ys.ravel()):
+            if bg[y, x]:
+                pts.append((int(x), int(y)))
+                seed_of.append(sf)
+        print(f"[cotrack]   seed frame {sf}: {100*bg.mean():.0f}% background, "
+              f"{len(pts)-n0} points")
     if len(pts) < 8:
-        sys.exit(f"only {len(pts)} background points at seed frame {seed_f} — "
-                 "the frame is essentially all person")
-    print(f"[cotrack] {T} frames at {W}x{H}, seed frame {seed_f}, "
-          f"{100*bg.mean():.0f}% background, {len(pts)} points seeded")
+        sys.exit(f"only {len(pts)} background points across seed frames "
+                 f"{seed_frames} — the frame is essentially all person")
+    print(f"[cotrack] {T} frames at {W}x{H}, {len(seed_frames)} seed frames, "
+          f"{len(pts)} points seeded")
 
     dev = a.device if (a.device != "cuda" or torch.cuda.device_count()) else "cpu"
     # queries are (t, x, y) with t the frame the point is seeded on
-    q = torch.tensor([[float(seed_f - 1), float(x), float(y)] for x, y in pts],
+    q = torch.tensor([[float(sf - 1), float(x), float(y)]
+                      for (x, y), sf in zip(pts, seed_of)],
                      dtype=torch.float32, device=dev)[None]
     # Video stays on the CPU: at 512x214 a 1395-frame shot is ~1.8GB on its
     # own, before the model allocates anything.
@@ -198,7 +240,10 @@ def main():
                 vv[t, i] = False   # on a person this frame: mute, don't kill
                 continue
             live += 1
-        if live >= max(8, T // 4):     # needs enough life to constrain a solve
+        # A point seeded at 3/4 through the shot cannot live T//4 frames.
+        # Judge each track against the span still ahead of its seed.
+        avail = max(1, T - (seed_of[i] - 1))
+        if live >= max(8, avail // 4):
             keep.append(i)
     print(f"[cotrack] {len(keep)} tracks survive masking+visibility "
           f"(of {tr.shape[1]} seeded)")
@@ -236,7 +281,8 @@ def main():
               f"{len(cells)} cells (cap {a.max_tracks})")
         keep = thinned
 
-    out = {"num_frames": T, "seed_frame": seed_f, "proc_size": [W, H],
+    out = {"num_frames": T, "seed_frames": seed_frames,
+           "proc_size": [W, H],
            "tracks": []}
     for i in keep:
         # normalized, bottom-left origin — Blender's marker.co convention
