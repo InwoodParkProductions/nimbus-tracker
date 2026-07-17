@@ -1,0 +1,154 @@
+"""Stage 5: composite — CG background behind the actors, the actual deliverable.
+
+Run with the SYSTEM python:
+    python comp_stage5.py <footage> <cg_dir> <masks_dir> <out_dir>
+        [--frames A-B] [--grow 2] [--feather 5] [--preview]
+
+Everything upstream produces ingredients: stage 1 makes person mattes, stage 4
+renders the CG plates. This puts them together:
+
+    comp = plate * alpha + CG * (1 - alpha)
+
+where alpha is the (softened) person matte. The person stays from the original
+plate; the CG replaces everything else. Output is a PNG sequence at the CG's
+resolution plus an optional small preview .mp4 for review.
+
+Masks come in binary from SAM2, which is right for track exclusion and crunchy
+for compositing — so the matte is grown slightly (protect hair/blur that the
+segmenter missed) and edge-feathered. Both are tunable; for hair-critical work
+a dedicated matting model can replace this (see --alpha-dir).
+"""
+
+import argparse
+import glob
+import os
+import re
+import sys
+
+import cv2
+import numpy as np
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("footage", help="original clip (the shot's frames are read "
+                                   "from it at full quality)")
+    p.add_argument("cg_dir", help="directory of rendered CG frames "
+                                  "(*_0001.png ... shot-relative, 1-based)")
+    p.add_argument("masks_dir", help="mask_NNNNNN.png dir (white = person)")
+    p.add_argument("out_dir")
+    p.add_argument("--frames", help="footage frame range A-B for this shot "
+                                    "(1-based inclusive). Default: start at "
+                                    "frame 1 for as many frames as there is CG.")
+    p.add_argument("--grow", type=int, default=2,
+                   help="grow the person matte by N px before feathering "
+                        "(default 2) — protects hair and motion blur the "
+                        "segmenter clipped")
+    p.add_argument("--feather", type=int, default=5,
+                   help="edge feather radius in px at CG resolution (default 5)")
+    p.add_argument("--alpha-dir",
+                   help="optional dir of refined alpha mattes "
+                        "(alpha_NNNNNN.png, white=person, gray=soft) — used "
+                        "instead of grown/feathered binary masks when present")
+    p.add_argument("--preview", action="store_true",
+                   help="also write preview.mp4 (1280 wide) for quick review")
+    return p.parse_args()
+
+
+def load_cg_frames(cg_dir):
+    """Map shot-relative frame number -> CG png path."""
+    out = {}
+    for p in glob.glob(os.path.join(cg_dir, "*.png")):
+        m = re.search(r"_(\d{4})\.png$", os.path.basename(p))
+        if m:
+            out[int(m.group(1))] = p
+    return out
+
+
+def load_alpha(args, rel_frame, size):
+    """Person alpha in [0,1] at `size` (w, h). 1 = keep plate (person)."""
+    w, h = size
+    if args.alpha_dir:
+        p = os.path.join(args.alpha_dir, f"alpha_{rel_frame:06d}.png")
+        if os.path.exists(p):
+            a = cv2.imread(p, 0)
+            if a is not None:
+                a = cv2.resize(a, (w, h), interpolation=cv2.INTER_LINEAR)
+                return a.astype(np.float32) / 255.0
+    m = None
+    if args.masks_dir:
+        p = os.path.join(args.masks_dir, f"mask_{rel_frame:06d}.png")
+        m = cv2.imread(p, 0) if os.path.exists(p) else None
+    if m is None:
+        return np.zeros((h, w), np.float32)   # no person this frame -> all CG
+    m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+    a = (m > 127).astype(np.float32)
+    if args.grow > 0:
+        k = 2 * args.grow + 1
+        a = cv2.dilate(a, np.ones((k, k), np.uint8))
+    if args.feather > 0:
+        k = 2 * args.feather + 1
+        a = cv2.GaussianBlur(a, (k, k), 0)
+    return a
+
+
+def main():
+    args = parse_args()
+    cg = load_cg_frames(args.cg_dir)
+    if not cg:
+        sys.exit(f"no CG frames (*_NNNN.png) found in {args.cg_dir}")
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    if args.frames:
+        a, b = (int(v) for v in args.frames.split("-"))
+    else:
+        a, b = 1, max(cg)
+
+    cap = cv2.VideoCapture(args.footage)
+    if not cap.isOpened():
+        sys.exit(f"cannot open {args.footage}")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, a - 1)
+
+    first = cv2.imread(cg[min(cg)])
+    ch, cw = first.shape[:2]
+    writer = None
+    if args.preview:
+        pw = 1280
+        ph2 = round(ch * pw / cw)
+        ph2 -= ph2 % 2
+        writer = cv2.VideoWriter(os.path.join(args.out_dir, "preview.mp4"),
+                                 cv2.VideoWriter_fourcc(*"mp4v"), 24.0,
+                                 (pw, ph2))
+
+    n_done = 0
+    for src_f in range(a, b + 1):
+        rel = src_f - a + 1
+        ok, plate = cap.read()
+        if not ok:
+            print(f"[comp] plate ended at source frame {src_f}")
+            break
+        if rel not in cg:
+            continue   # CG frame missing (partial render) — skip, don't fake
+        cgf = cv2.imread(cg[rel])
+        if cgf is None:
+            continue
+        plate_r = cv2.resize(plate, (cw, ch), interpolation=cv2.INTER_AREA)
+        alpha = load_alpha(args, rel, (cw, ch))[..., None]
+        comp = plate_r.astype(np.float32) * alpha \
+            + cgf.astype(np.float32) * (1.0 - alpha)
+        out = np.clip(comp, 0, 255).astype(np.uint8)
+        cv2.imwrite(os.path.join(args.out_dir, f"comp_{rel:04d}.png"), out)
+        if writer is not None:
+            writer.write(cv2.resize(out, (pw, ph2)))
+        n_done += 1
+    cap.release()
+    if writer is not None:
+        writer.release()
+        print(f"[comp] preview: {os.path.join(args.out_dir, 'preview.mp4')}")
+    print(f"[comp] {n_done} frames -> {args.out_dir}")
+    if n_done == 0:
+        sys.exit("no frames composited")
+
+
+if __name__ == "__main__":
+    main()

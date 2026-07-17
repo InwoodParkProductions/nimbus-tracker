@@ -142,6 +142,10 @@ def parse_args():
                    help="Seconds before a masking/tracking stage is treated "
                         "as hung (default 3600). Rendering is deliberately "
                         "unbounded — long renders are legitimate.")
+    p.add_argument("--no-comp", action="store_true",
+                   help="Skip stage 5 (compositing CG behind the actors "
+                        "after the render). On by default because the "
+                        "composited shot IS the deliverable.")
     p.add_argument("--no-cotracker", action="store_true",
                    help="Skip the learned tracking front-end and use the "
                         "classic detect+KLT one. The learned front-end is "
@@ -208,6 +212,52 @@ def render_landed(render_path):
     if os.path.splitext(render_path)[1]:      # .mp4 and friends: one file
         return os.path.exists(render_path)
     return bool(glob.glob(render_path + "_*.png"))
+
+
+def do_comp(args, shot, masks_dir):
+    """Stage 5: composite the rendered CG behind the actors — the deliverable.
+
+    Best-effort by design, like the learned tracker: soft alpha mattes come
+    from RobustVideoMatting when it can run (GPU, weights — note its GPL-3.0
+    license before commercial distribution), and the comp falls back to the
+    grown/feathered SAM2 masks otherwise. Measured on shot 19: the binary
+    masks leave a visible halo band around the silhouette where the grown
+    matte drags backdrop in; RVM's soft alpha has no halo and keeps fabric
+    fringe. Output lands next to the render:  <render_dir>/comp/
+    """
+    if not args.render or args.no_comp:
+        return
+    cg_dir = os.path.dirname(os.path.abspath(args.render))
+    import re as _re
+    rels = [int(m.group(1)) for f in os.listdir(cg_dir)
+            if (m := _re.search(r"_(\d{4})\.png$", f))]
+    if not rels:
+        print("[comp] no rendered PNG frames found — comp skipped "
+              "(mp4 renders can't be composited per-frame)")
+        return
+    a = shot["frame_start"]
+    b = a + max(rels) - 1
+    comp_dir = os.path.join(cg_dir, "comp")
+    alpha_dir = os.path.join(cg_dir, "alpha")
+    have_alpha = run_ok(
+        py_cmd("matte_people") + [args.footage_abs, alpha_dir,
+                                  "--frames", f"{a}-{b}"],
+        "Stage 5a: soft person mattes (RVM)", timeout=args.stage_timeout)
+    cmd = py_cmd("comp_stage5") + [args.footage_abs, cg_dir,
+                                   masks_dir or "", comp_dir,
+                                   "--frames", f"{a}-{b}", "--preview"]
+    if have_alpha:
+        cmd += ["--alpha-dir", alpha_dir]
+    elif masks_dir:
+        print("[comp] RVM unavailable — using feathered SAM2 masks "
+              "(expect a slight edge halo)")
+    else:
+        print("[comp] no matte source (RVM failed, no masks) — comp "
+              "skipped; the render is still in place")
+        return
+    if run_ok(cmd, "Stage 5: compositing CG behind the actors",
+              timeout=args.stage_timeout):
+        print(f"Composite:       {comp_dir}  (+ preview.mp4)")
 
 
 def do_render(args, scene_out):
@@ -344,6 +394,7 @@ def shot_motion(footage, start, end, gap=12, windows=4):
 def main():
     args = parse_args()
     footage = os.path.abspath(args.footage)
+    args.footage_abs = footage
     if not os.path.exists(footage):
         sys.exit(f"Footage not found: {footage}")
 
@@ -453,6 +504,7 @@ def main():
                     print(f"[info] static shot: rendering 1 frame instead of "
                           f"{n} identical ones")
                 do_render(args, scene_out)
+                do_comp(args, shot, None)
                 print("\n=== DONE ===")
                 print(f"Work folder:     {workdir}")
                 print("Solve:           locked-off static camera (no motion)")
@@ -709,6 +761,7 @@ def main():
 
     # ---- Stage 4: render ----
     do_render(args, scene_out)
+    do_comp(args, shot, masks_dir if use_masks else None)
 
     print("\n=== DONE ===")
     print(f"Work folder:     {workdir}")

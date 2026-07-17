@@ -10,7 +10,8 @@ binaries = []
 # packaged app silently falls back to the classic detect+KLT path on every shot
 # (the fallback is deliberate, but it should not be triggered by a build gap).
 hiddenimports = ['ui', 'auto_track', 'split_shots', 'segment_people', 'flow_solve',
-                 'cotrack_points', 'torch', 'torchvision',
+                 'cotrack_points', 'matte_people', 'comp_stage5',
+                 'torch', 'torchvision',
                  'webview', 'webview.platforms.edgechromium',
                  'webview.platforms.winforms',
                  'clr', 'clr_loader', 'pythonnet']
