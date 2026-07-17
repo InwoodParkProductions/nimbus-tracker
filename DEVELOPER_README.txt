@@ -26,12 +26,37 @@ ui.py                  The app: window, pages, render queue, all UI.
                        The look lives in the CSS string near the top.
 aerotrack_main.py      Entry point of the packaged .exe.
 auto_track.py          Pipeline orchestrator: static-or-moving decision,
-                       3D -> 2D fallback chain, stage timing, render.
+                       the solve chain, stage timing, render. The solve
+                       chain per shot is:
+                         classic KLT front-end  (precise on sharp footage)
+                           -> learned front-end (robust on soft footage)
+                             -> 2D flow -> static hold
+                       and within each front-end, three solve attempts run
+                       in SEPARATE Blender processes (auto keyframes,
+                       manual keyframes, tripod) — Blender's solver is
+                       stateful within a session and second solves can
+                       return garbage; one attempt per process is the only
+                       configuration found reliable. Best validated result
+                       wins (perspective > tripod > none, then lower error).
 split_shots.py         Stage 0 — cuts the clip into shots (+1080p proxies).
 segment_people.py      Stage 1 — AI person masking (SAM2 silhouettes +
                        YOLO union + motion attach + gear pass + hysteresis).
-auto_track_stage2.py   Stage 2 — Blender camera track + solve (runs INSIDE
-                       Blender's Python).
+cotrack_points.py      Stage 2a — learned point tracking (CoTracker3,
+                       streamed so VRAM is flat in shot length). Seeds a
+                       grid on the BACKGROUND (person masks say where) and
+                       tracks through blur KLT can't hold. Weights download
+                       on first use (~100MB); without them the pipeline
+                       falls back to the classic front-end. NOTE: check the
+                       CoTracker license before commercial distribution.
+auto_track_stage2.py   Stage 2 — builds tracks (KLT, or from cotrack json)
+                       and solves ONE configured attempt per process
+                       (settings["solve_attempt"]). Solves are validated for
+                       geometry, not just reprojection error: a homography
+                       test plus bundle flatness/depth checks reject
+                       "perspective" solves with no real 3D structure —
+                       on greenscreen plates the only trackable points are
+                       a flat backdrop, and a low-error fake-3D solve bakes
+                       a confidently wrong camera into the scene.
 flow_solve.py          Stage 2c — 2D motion-match fallback camera.
 apply_track_stage3.py  Stage 3 — bakes the solved camera into your scene
                        (runs inside Blender).
