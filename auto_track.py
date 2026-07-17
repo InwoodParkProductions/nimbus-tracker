@@ -131,6 +131,17 @@ def parse_args():
                    help="Render in a visible Blender window instead of "
                         "headless, so you can watch frames appear. Costs GPU "
                         "time and ~0.8GB of VRAM; off by default.")
+    p.add_argument("--solve-timeout", type=int, default=1200,
+                   help="Seconds before stage 2 is considered hung and the "
+                        "shot falls back to the 2D flow path (default 1200). "
+                        "Blender's bundle adjustment can thrash on a "
+                        "degenerate problem without ever converging or "
+                        "erroring — measured at 8.5 hours on a 34-frame shot. "
+                        "A real solve finishes in minutes.")
+    p.add_argument("--stage-timeout", type=int, default=3600,
+                   help="Seconds before a masking/tracking stage is treated "
+                        "as hung (default 3600). Rendering is deliberately "
+                        "unbounded — long renders are legitimate.")
     p.add_argument("--no-cotracker", action="store_true",
                    help="Skip the learned tracking front-end and use the "
                         "classic detect+KLT one. The learned front-end is "
@@ -242,15 +253,29 @@ def do_render(args, scene_out):
 STAGE_TIMES = []  # (label, seconds) — printed as a breakdown at DONE
 
 
-def run_ok(cmd, what):
+def run_ok(cmd, what, timeout=None):
     """Run a stage but DON'T abort on failure — return True/False so the
     caller can fall back. Used for every stage that has a safety net, so a
     single crashing shot never kills the batch: it degrades to the next
-    approach (3D solve -> 2D flow -> static hold; Cycles -> Eevee)."""
+    approach (3D solve -> 2D flow -> static hold; Cycles -> Eevee).
+
+    `timeout` (seconds) covers the case the fallbacks could not: a stage that
+    neither crashes nor finishes. Blender's Ceres bundle adjustment can hit a
+    degenerate problem and thrash forever — observed on a 34-frame shot that
+    logged "Step failed to evaluate. Treating it as a step with infinite cost"
+    for 8.5 HOURS without converging or giving up. A crash degrades gracefully;
+    a hang stalls the whole queue overnight with nothing to show. Pass None
+    only for stages that are legitimately open-ended (rendering).
+    """
     print(f"\n=== {what} ===")
     t0 = time.time()
     try:
-        ok = subprocess.run(cmd, **_inherit_io()).returncode == 0
+        ok = subprocess.run(cmd, timeout=timeout,
+                            **_inherit_io()).returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"[warn] {what} exceeded {timeout}s and was stopped — this "
+              "stage is not converging; falling back to the next approach")
+        ok = False
     except Exception as e:
         print(f"[warn] {what} could not run: {e}")
         ok = False
@@ -492,7 +517,8 @@ def main():
         stage2_cmd += ["--masks", masks_dir]
     stage2_cmd += ["--settings", json.dumps(tset)]
     stage2_ok = run_ok(stage2_cmd,
-                       "Stage 2: tracking camera against the background")
+                       "Stage 2: tracking camera against the background",
+                       timeout=args.solve_timeout)
 
     log_path = os.path.join(out_dir, tag + "_masked_track_log.json")
     metrics, err = {}, None
