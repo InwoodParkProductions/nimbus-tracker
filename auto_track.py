@@ -486,6 +486,15 @@ def main():
         flow_json = os.path.join(out_dir, tag + "_flow_solve.json")
         os.makedirs(out_dir, exist_ok=True)
         flow_cmd = py_cmd("flow_solve") + [shot_file, flow_json]
+        # Pass the known lens. flow_solve defaults to 35mm, and it uses the
+        # focal to build K — rot_from_homography divides measured image motion
+        # by it, so a wrong focal scales every recovered pan/tilt by the same
+        # factor (a 14mm plate solved as 35mm under-rotates ~2.5x). The focal
+        # also lands in the json and becomes the baked camera's lens, so a
+        # wrong guess gives the CG camera the wrong FOV as well. Every other
+        # stage is already told the lens; this one was the exception.
+        if args.lens_mm:
+            flow_cmd += ["--focal-mm", str(args.lens_mm)]
         if use_masks:
             flow_cmd += ["--masks", masks_dir]
         flow_ok = run_ok(flow_cmd, "Stage 2c: 2D flow solve (approximate)")
