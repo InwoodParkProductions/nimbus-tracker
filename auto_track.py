@@ -131,6 +131,17 @@ def parse_args():
                    help="Render in a visible Blender window instead of "
                         "headless, so you can watch frames appear. Costs GPU "
                         "time and ~0.8GB of VRAM; off by default.")
+    p.add_argument("--no-cotracker", action="store_true",
+                   help="Skip the learned tracking front-end and use the "
+                        "classic detect+KLT one. The learned front-end is "
+                        "worth a tripod-vs-perspective solve on soft footage, "
+                        "so this is for debugging or comparison.")
+    p.add_argument("--cotracker-max-frames", type=int, default=400,
+                   help="Shots longer than this use the classic front-end: "
+                        "the offline tracker holds the whole clip in VRAM, "
+                        "and windowing it would break tracks across the "
+                        "boundary the solver's keyframes need to span "
+                        "(default 400).")
     p.add_argument("--masking-model", default="best",
                    help="Person-masking model: 'fast' (yolo11n, quick) or "
                         "'best' (yolo11x, detects costumes/unusual figures — "
@@ -450,6 +461,30 @@ def main():
     if args.lens_mm:  # known lens: use it fixed, don't refine focal length
         tset["focal_length_mm"] = float(args.lens_mm)
         tset["refine_focal"] = False
+    # ---- Stage 2a: learned point tracking (best effort) ----
+    # Seeds a dense grid on the background and tracks it with CoTracker3
+    # instead of detecting corners and throwing away the ones on people. On
+    # this project's footage that is the difference between a rotation-only
+    # tripod fallback and a real 3D solve:
+    #   shot 19: tripod 2.58px (6 tracks)  -> perspective 1.86px (212 tracks)
+    #   shot 09: no solve   (4 tracks)     -> perspective 1.07px (134 tracks)
+    # It is best-effort on purpose: too long a shot, no GPU, no weights, no
+    # network on first run — any of those and we fall through to the classic
+    # detect+KLT front-end, which still works and is still regression-tested.
+    if not args.no_cotracker:
+        points_json = os.path.join(out_dir, tag + "_cotrack.json")
+        os.makedirs(out_dir, exist_ok=True)
+        ct_cmd = py_cmd("cotrack_points") + [shot_file, points_json]
+        if use_masks:
+            ct_cmd += ["--masks", masks_dir]
+        ct_cmd += ["--max-frames", str(args.cotracker_max_frames)]
+        if run_ok(ct_cmd, "Stage 2a: learned point tracking (background)") \
+                and os.path.exists(points_json):
+            tset["points_json"] = points_json
+        else:
+            print("[warn] learned tracking unavailable for this shot — "
+                  "using the classic detect+track front-end")
+
     stage2_cmd = [args.blender, "-b", os.path.join(HERE, "template.blend"),
                   "-P", os.path.join(HERE, "auto_track_stage2.py"), "--",
                   shot_file, out_dir]

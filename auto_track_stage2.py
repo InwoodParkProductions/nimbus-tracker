@@ -264,17 +264,38 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
     stats["solve_mode"] = "perspective"
 
     if err is not None:
-        # Clean-and-resolve, capped so we always keep enough survivors
-        keep_min = settings.get("keep_min_tracks", 12)
-        tracks = clip.tracking.tracks
-        solved = sorted((t for t in tracks if t.average_error > 0),
-                        key=lambda t: t.average_error, reverse=True)
-        max_deletable = max(0, len(solved) - keep_min)
-        doomed = [t for t in solved if t.average_error > clean_error][:max_deletable]
-        if doomed:
-            delete_selected_tracks_only(tracks, doomed)
-            new_err = try_solve("perspective (cleaned)")
-            err = new_err if new_err is not None else err
+        # Clean-and-resolve — but only on a solve that actually needs it.
+        #
+        # Deleting tracks is destructive and cannot be undone: once they're
+        # gone the previous reconstruction is unrecoverable, so `err` has to
+        # take whatever the re-solve gives, better or worse. That's fine when
+        # rescuing a bad solve (693px -> 1.86px, measured), and actively
+        # harmful on a good one. Measured on shot 19 with the learned
+        # front-end: a 1.97px perspective solve cleaned to 108px, which then
+        # blew past the tripod threshold and shipped a 2.75px ROTATION-ONLY
+        # solve instead of the working 3D one that was already in hand.
+        #
+        # So: if the solve is already inside the "good" band, leave it alone.
+        clean_above = settings.get("clean_if_error_above", 3.0)
+        if err > clean_above:
+            keep_min = settings.get("keep_min_tracks", 12)
+            tracks = clip.tracking.tracks
+            solved = sorted((t for t in tracks if t.average_error > 0),
+                            key=lambda t: t.average_error, reverse=True)
+            max_deletable = max(0, len(solved) - keep_min)
+            doomed = [t for t in solved
+                      if t.average_error > clean_error][:max_deletable]
+            if doomed:
+                delete_selected_tracks_only(tracks, doomed)
+                new_err = try_solve("perspective (cleaned)")
+                if new_err is not None and new_err > err:
+                    print(f"[stage2] cleaning made it worse "
+                          f"({err:.2f} -> {new_err:.2f} px); the pruned tracks "
+                          "are gone, so that is what we have")
+                err = new_err if new_err is not None else err
+        else:
+            print(f"[stage2] solve is {err:.2f} px — skipping the clean pass "
+                  f"(only runs above {clean_above:g} px)")
 
     tripod_at = settings.get("tripod_fallback_error", 8.0)
 
