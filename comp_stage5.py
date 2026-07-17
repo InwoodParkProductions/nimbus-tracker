@@ -21,6 +21,7 @@ a dedicated matting model can replace this (see --alpha-dir).
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -50,9 +51,71 @@ def parse_args():
                    help="optional dir of refined alpha mattes "
                         "(alpha_NNNNNN.png, white=person, gray=soft) — used "
                         "instead of grown/feathered binary masks when present")
+    p.add_argument("--solve-json",
+                   help="solve dump (dump_solve.py) — when given, the CG is "
+                        "warped through the solve's lens-distortion model so "
+                        "it sits in the same distorted image space as the "
+                        "plate. Blender renders CG through an ideal pinhole; "
+                        "the plate has the real lens. Without this the comp "
+                        "misaligns progressively toward the frame edges — "
+                        "measured at 400px in the corners on one real solve.")
     p.add_argument("--preview", action="store_true",
                    help="also write preview.mp4 (1280 wide) for quick review")
     return p.parse_args()
+
+
+def build_distort_map(solve_json, cw, ch):
+    """Remap grids that warp a pinhole CG render into the plate's distorted
+    image space, using the solve's own lens model.
+
+    For every destination pixel (plate space) we need the CG source pixel:
+    invert the forward distortion (undistorted -> distorted) per pixel. The
+    polynomial model is radial, so it reduces to solving rd = ru * s(ru^2)
+    for ru — done with vectorized Newton (the QC overlay already proved the
+    forward model puts solve points onto the plate's markers, so this inverse
+    puts CG pixels there too).
+
+    Returns (mapx, mapy, max_shift_px) or None when there's no distortion.
+    """
+    d = json.load(open(solve_json))
+    if d.get("distortion_model", "POLYNOMIAL") != "POLYNOMIAL":
+        print("[comp] non-polynomial distortion model — CG left unwarped")
+        return None
+    k1, k2, k3 = d.get("k1", 0.0), d.get("k2", 0.0), d.get("k3", 0.0)
+    if abs(k1) < 1e-9 and abs(k2) < 1e-9 and abs(k3) < 1e-9:
+        return None
+    clip_w, clip_h = d["clip_size"]
+    f_px = d["lens_mm"] / d["sensor_mm"] * cw
+    pp = d.get("principal_px") or [clip_w / 2.0, clip_h / 2.0]
+    ppx, ppy = pp[0] / clip_w * cw, pp[1] / clip_h * ch   # bottom-left origin
+
+    U, V = np.meshgrid(np.arange(cw, dtype=np.float64),
+                       np.arange(ch, dtype=np.float64))
+    xd = (U - ppx) / f_px
+    yd = ((ch - ppy) - V) / f_px
+    rd = np.sqrt(xd * xd + yd * yd)
+
+    ru = rd.copy()                       # Newton: solve ru*s(ru^2) = rd
+    for _ in range(10):
+        r2 = ru * ru
+        s = 1.0 + k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3
+        ds = 1.0 + 3 * k1 * r2 + 5 * k2 * r2 ** 2 + 7 * k3 * r2 ** 3
+        ru = ru - (ru * s - rd) / np.where(np.abs(ds) < 1e-9, 1e-9, ds)
+    scale = np.where(rd > 1e-12, ru / np.where(rd > 1e-12, rd, 1.0), 1.0)
+    xu, yu = xd * scale, yd * scale
+
+    # CG was rendered by Blender: centred principal point
+    mapx = (cw / 2.0 + f_px * xu).astype(np.float32)
+    mapy = (ch / 2.0 - f_px * yu).astype(np.float32)
+    shift = float(np.max(np.hypot(mapx - U, mapy - V)))
+    # residual of the inversion (roundtrip): should be tiny
+    r2 = ru * ru
+    resid = float(np.max(np.abs(ru * (1 + k1 * r2 + k2 * r2 ** 2
+                                      + k3 * r2 ** 3) - rd))) * f_px
+    print(f"[comp] CG distortion-matched to the solve "
+          f"(k1={k1:.3f}) — max shift {shift:.1f}px, "
+          f"inversion residual {resid:.3f}px")
+    return mapx, mapy, shift
 
 
 def load_cg_frames(cg_dir):
@@ -111,6 +174,9 @@ def main():
 
     first = cv2.imread(cg[min(cg)])
     ch, cw = first.shape[:2]
+    dmap = None
+    if args.solve_json and os.path.exists(args.solve_json):
+        dmap = build_distort_map(args.solve_json, cw, ch)
     writer = None
     if args.preview:
         pw = 1280
@@ -132,6 +198,13 @@ def main():
         cgf = cv2.imread(cg[rel])
         if cgf is None:
             continue
+        if dmap is not None:
+            # warp the pinhole CG into the plate's distorted space. Corners
+            # can sample slightly beyond the rendered frame (the plate's
+            # barrel pulls edges inward); replicate is the least-bad fill —
+            # a proper fix is rendering CG with overscan, noted for later.
+            cgf = cv2.remap(cgf, dmap[0], dmap[1], cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_REPLICATE)
         plate_r = cv2.resize(plate, (cw, ch), interpolation=cv2.INTER_AREA)
         alpha = load_alpha(args, rel, (cw, ch))[..., None]
         comp = plate_r.astype(np.float32) * alpha \

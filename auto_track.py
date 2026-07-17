@@ -214,7 +214,7 @@ def render_landed(render_path):
     return bool(glob.glob(render_path + "_*.png"))
 
 
-def do_comp(args, shot, masks_dir):
+def do_comp(args, shot, masks_dir, solve_json=None):
     """Stage 5: composite the rendered CG behind the actors — the deliverable.
 
     Best-effort by design, like the learned tracker: soft alpha mattes come
@@ -246,6 +246,13 @@ def do_comp(args, shot, masks_dir):
     cmd = py_cmd("comp_stage5") + [args.footage_abs, cg_dir,
                                    masks_dir or "", comp_dir,
                                    "--frames", f"{a}-{b}", "--preview"]
+    # Warp the CG through the solve's lens model so it sits in the plate's
+    # distorted image space — without it the comp misaligns toward the frame
+    # edges (measured at ~400px in the corners on one real solve). The QC
+    # step wrote the model next to the track log; no solve dump (static or
+    # 2D-flow shots) means no warp, which is correct for those.
+    if solve_json and os.path.exists(solve_json):
+        cmd += ["--solve-json", solve_json]
     if have_alpha:
         cmd += ["--alpha-dir", alpha_dir]
     elif masks_dir:
@@ -777,7 +784,8 @@ def main():
 
     # ---- Stage 4: render ----
     do_render(args, scene_out)
-    do_comp(args, shot, masks_dir if use_masks else None)
+    do_comp(args, shot, masks_dir if use_masks else None,
+            solve_json=os.path.join(out_dir, tag + "_qc", "solve.json"))
 
     print("\n=== DONE ===")
     print(f"Work folder:     {workdir}")
