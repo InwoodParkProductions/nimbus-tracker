@@ -486,49 +486,116 @@ def main():
     if args.lens_mm:  # known lens: use it fixed, don't refine focal length
         tset["focal_length_mm"] = float(args.lens_mm)
         tset["refine_focal"] = False
-    # ---- Stage 2a: learned point tracking (best effort) ----
-    # Seeds a dense grid on the background and tracks it with CoTracker3
-    # instead of detecting corners and throwing away the ones on people. On
-    # this project's footage that is the difference between a rotation-only
-    # tripod fallback and a real 3D solve:
-    #   shot 19: tripod 2.58px (6 tracks)  -> perspective 1.86px (212 tracks)
-    #   shot 09: no solve   (4 tracks)     -> perspective 1.07px (134 tracks)
-    # It is best-effort on purpose: too long a shot, no GPU, no weights, no
-    # network on first run — any of those and we fall through to the classic
-    # detect+KLT front-end, which still works and is still regression-tested.
-    if not args.no_cotracker:
+    # ---- Stage 2: classic first, learned retry -----------------------------
+    # Two front-ends feed the same solver, and they win on different footage:
+    #   classic KLT   more PRECISE on sharp footage (lab 2: 1.53px vs 3.45px —
+    #                 CoTracker's accuracy floor is ~3.5px regardless of
+    #                 processing width; measured at 512/768/1024)
+    #   learned       more ROBUST on soft/blurred footage, where KLT finds
+    #                 almost nothing off the actors (shot 09: no solve vs
+    #                 tripod 1.91px on 200 tracks; shot 19: 6 tracks vs 200)
+    # So: run the precise one, and only if its solve is missing or weak, retry
+    # with the robust one and keep the better result. This extends the
+    # existing fallback chain to: classic 3D -> learned 3D -> 2D flow ->
+    # static hold.
+
+    def stage2_run(dest, points_json=None, label="classic detect+KLT",
+                   attempt="auto"):
+        os.makedirs(dest, exist_ok=True)
+        s = dict(tset)
+        s["solve_attempt"] = attempt
+        if points_json:
+            s["points_json"] = points_json
+        cmd = [args.blender, "-b", os.path.join(HERE, "template.blend"),
+               "-P", os.path.join(HERE, "auto_track_stage2.py"), "--",
+               shot_file, dest]
+        if use_masks:
+            cmd += ["--masks", masks_dir]
+        cmd += ["--settings", json.dumps(s)]
+        ok = run_ok(cmd, f"Stage 2: tracking camera ({label}, {attempt})",
+                    timeout=args.solve_timeout)
+        m = {}
+        try:
+            with open(os.path.join(dest, tag + "_masked_track_log.json")) as f:
+                m = json.load(f)
+        except Exception:
+            ok = False
+        return ok, m, m.get("average_solve_error"), m.get("solve_mode")
+
+    def solve_rank(mode, e):
+        """Orderable quality: perspective beats tripod beats nothing, and
+        within a mode a lower error wins."""
+        if e is None:
+            return (0, 0.0)
+        return (2 if mode == "perspective" else 1, -e)
+
+    tripod_at = tset.get("tripod_fallback_error", 8.0)
+
+    def stage2_attempts(base_dir, points_json=None, label="classic detect+KLT"):
+        """auto -> manual -> tripod, ONE pristine Blender process each.
+
+        Solving twice in one process is unreliable — Blender's solver carries
+        hidden state between solves (the same markers that solved at 4.38px
+        re-solved at 492.55px moments later, and a fifth in-process attempt
+        returned 13 million px). First solves in a fresh process are
+        consistently sane, so every attempt gets its own process, and the
+        best result's files are copied into place.
+        """
+        best = (None, {}, None, None, None)   # rank-holder: ok,m,err,mode,dir
+        for attempt in ("auto", "manual", "tripod"):
+            adir = os.path.join(base_dir + "_attempts", attempt)
+            ok, m, e, md = stage2_run(adir, points_json, label, attempt)
+            if ok and solve_rank(md, e) > solve_rank(best[3], best[2]):
+                best = (ok, m, e, md, adir)
+            # A clean perspective solve is the ceiling — stop early. tripod
+            # can't beat it, and manual only exists to rescue auto's failures.
+            if md == "perspective" and e is not None and e <= tripod_at:
+                break
+        if best[4]:
+            import shutil
+            os.makedirs(base_dir, exist_ok=True)
+            for fn in os.listdir(best[4]):
+                shutil.copy2(os.path.join(best[4], fn),
+                             os.path.join(base_dir, fn))
+        return best[0] or False, best[1], best[2], best[3]
+
+    stage2_ok, metrics, err, mode2 = stage2_attempts(out_dir)
+    classic_good = (mode2 == "perspective" and err is not None
+                    and err <= tripod_at)
+
+    if not classic_good and not args.no_cotracker:
+        print(f"[stage2] classic front-end result: "
+              f"{mode2 or 'no solve'}"
+              + (f" {err:.2f}px" if err is not None else "")
+              + " — retrying with the learned front-end")
         points_json = os.path.join(out_dir, tag + "_cotrack.json")
         os.makedirs(out_dir, exist_ok=True)
         ct_cmd = py_cmd("cotrack_points") + [shot_file, points_json]
         if use_masks:
             ct_cmd += ["--masks", masks_dir]
         ct_cmd += ["--max-frames", str(args.cotracker_max_frames)]
-        if run_ok(ct_cmd, "Stage 2a: learned point tracking (background)") \
-                and os.path.exists(points_json):
-            tset["points_json"] = points_json
+        if run_ok(ct_cmd, "Stage 2a: learned point tracking (background)",
+                  timeout=args.stage_timeout) and os.path.exists(points_json):
+            ct_dir = out_dir + "_ct"
+            ok2, m2, err2, mode22 = stage2_attempts(
+                ct_dir, points_json, label="learned front-end")
+            if ok2 and solve_rank(mode22, err2) > solve_rank(mode2, err):
+                print(f"[stage2] learned front-end wins: "
+                      f"{mode22} {err2:.2f}px vs "
+                      f"{mode2 or 'no solve'}"
+                      + (f" {err:.2f}px" if err is not None else ""))
+                import shutil
+                for fn in os.listdir(ct_dir):
+                    shutil.copy2(os.path.join(ct_dir, fn),
+                                 os.path.join(out_dir, fn))
+                stage2_ok, metrics, err, mode2 = ok2, m2, err2, mode22
+            else:
+                print("[stage2] keeping the classic front-end's result")
         else:
             print("[warn] learned tracking unavailable for this shot — "
-                  "using the classic detect+track front-end")
-
-    stage2_cmd = [args.blender, "-b", os.path.join(HERE, "template.blend"),
-                  "-P", os.path.join(HERE, "auto_track_stage2.py"), "--",
-                  shot_file, out_dir]
-    if use_masks:
-        stage2_cmd += ["--masks", masks_dir]
-    stage2_cmd += ["--settings", json.dumps(tset)]
-    stage2_ok = run_ok(stage2_cmd,
-                       "Stage 2: tracking camera against the background",
-                       timeout=args.solve_timeout)
+                  "keeping the classic result")
 
     log_path = os.path.join(out_dir, tag + "_masked_track_log.json")
-    metrics, err = {}, None
-    if stage2_ok:
-        try:
-            with open(log_path) as f:
-                metrics = json.load(f)
-            err = metrics.get("average_solve_error")
-        except Exception:
-            err = None
     if not stage2_ok or err is None:
         print("[warn] 3D tracking didn't produce a usable solve — falling back "
               "to the 2D motion match")

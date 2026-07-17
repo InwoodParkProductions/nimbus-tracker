@@ -379,6 +379,16 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
         that kill the pipeline. Degenerate 'solves' (NaN error, or fewer
         than min_solved contributing tracks) are rejected: a 1-track
         0.00px tripod solve is noise, not a camera path."""
+        # Start every attempt from a clean slate. Solving with a previous
+        # reconstruction still present is badly stateful: re-solving the SAME
+        # marker data that just gave 4.38px produced 492.55px, and the logs
+        # are full of second attempts (cleaned/restored/manual-keyframe)
+        # collapsing to 100-500px garbage while first attempts are sane. The
+        # old reconstruction appears to poison the new solve's initialization.
+        try:
+            bpy.ops.clip.clear_solution()
+        except Exception:
+            pass
         bpy.ops.clip.select_all(action='SELECT')
         try:
             bpy.ops.clip.solve_camera()
@@ -452,6 +462,43 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
               f"({n_solved} tracks)")
         return err
 
+    # ---- single-attempt mode ----------------------------------------------
+    # settings["solve_attempt"] runs exactly ONE configured solve and returns.
+    # Blender's solve is badly stateful within a session: re-solving the SAME
+    # markers that just gave 4.38px produced 492.55px, clear_solution() only
+    # softened it to 28px, and a manual-keyframe attempt after four prior
+    # solves returned 13,163,114px. First solves in a fresh process are
+    # consistently sane; third-and-later solves in one process are frequently
+    # insane. So the retry chain lives in auto_track.py, launching one
+    # pristine process per attempt:
+    #   "auto"    perspective, Blender picks the keyframes
+    #   "manual"  perspective, keyframes = best-covered frame in each half
+    #   "tripod"  rotation-only
+    # The in-process chain below is legacy for direct CLI use.
+    attempt = settings.get("solve_attempt")
+    if attempt:
+        if attempt == "tripod":
+            ts.use_tripod_solver = True
+        elif attempt == "manual":
+            ts.use_keyframe_selection = False
+
+            def _marker_count(f):
+                return sum(1 for t in clip.tracking.tracks
+                           if (m := t.markers.find_frame(f)) and not m.mute)
+            half = fs + fd // 2
+            obj = clip.tracking.objects.active
+            obj.keyframe_a = max(range(fs, half), key=_marker_count,
+                                 default=fs)
+            obj.keyframe_b = max(range(half, fs + fd), key=_marker_count,
+                                 default=fs + fd - 1)
+            stats["manual_keyframes"] = [obj.keyframe_a, obj.keyframe_b]
+        err = try_solve(f"{attempt} attempt")
+        stats["solve_mode"] = (None if err is None else
+                               ("tripod" if attempt == "tripod"
+                                else "perspective"))
+        stats["accepted_error"] = err
+        return clip
+
     err = try_solve("perspective")
     stats["solve_mode"] = "perspective"
 
@@ -467,14 +514,19 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
         # blew past the tripod threshold and shipped a 2.75px ROTATION-ONLY
         # solve instead of the working 3D one that was already in hand.
         #
-        # So: only clean a solve we would otherwise REJECT. Below the tripod
-        # threshold the solve is usable as-is, and cleaning it is all risk and
-        # no reward — measured on shot 06, a usable 3.82px solve was cleaned
-        # into 131.78px of coplanar garbage. Above the threshold the pre-clean
-        # solve was headed for the fallback chain anyway, so a failed rescue
-        # loses nothing.
-        clean_above = settings.get("clean_if_error_above",
-                                   settings.get("tripod_fallback_error", 8.0))
+        # Clean by MUTING, not deleting, so a clean that backfires can be
+        # reverted. The history here: cleaning used to delete tracks, which is
+        # unrecoverable — it turned a usable 3.82px solve into 131.78px of
+        # coplanar garbage with no way back, and (worse) the code kept
+        # reporting the old error for a reconstruction that no longer existed.
+        # Muting excludes the same markers from the solve while keeping the
+        # data, so the worse/rejected case can restore and re-solve. The
+        # restore's own result is what gets reported — a re-solve is not
+        # guaranteed to reproduce the original number exactly (Blender's
+        # bundle adjustment has run-to-run variance), and the file always wins.
+        # Worth having at all because cleaning is a real rescue: measured
+        # 693px -> 1.86px on garbage, and 4.38px -> ~1.5px on lab 2.
+        clean_above = settings.get("clean_if_error_above", 3.0)
         if err > clean_above:
             keep_min = settings.get("keep_min_tracks", 12)
             tracks = clip.tracking.tracks
@@ -484,21 +536,25 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
             doomed = [t for t in solved
                       if t.average_error > clean_error][:max_deletable]
             if doomed:
-                delete_selected_tracks_only(tracks, doomed)
+                muted_now = []
+                for t in doomed:
+                    for mk in t.markers:
+                        if not mk.mute:
+                            mk.mute = True
+                            muted_now.append(mk)
+                print(f"[stage2] muting {len(doomed)} high-error tracks "
+                      f"({len(muted_now)} markers) and re-solving")
                 new_err = try_solve("perspective (cleaned)")
-                if new_err is None:
-                    print("[stage2] cleaning destroyed the solve; the pruned "
-                          "tracks are gone — continuing to the fallback chain")
-                elif new_err > err:
-                    print(f"[stage2] cleaning made it worse "
-                          f"({err:.2f} -> {new_err:.2f} px); the pruned tracks "
-                          "are gone, so that is what we have")
-                # The re-solve REPLACED the reconstruction in the file — the
-                # old one no longer exists, so its error must not be reported.
-                # Keeping the old number here shipped a file holding 131.78px
-                # of garbage while the log said 3.82px GOOD (same bug as the
-                # tripod-restore path, third occurrence).
-                err = new_err
+                if new_err is not None and new_err < err:
+                    err = new_err
+                else:
+                    label = ("rejected" if new_err is None
+                             else f"worse ({err:.2f} -> {new_err:.2f} px)")
+                    print(f"[stage2] cleaned solve {label} — unmuting and "
+                          "re-solving to restore")
+                    for mk in muted_now:
+                        mk.mute = False
+                    err = try_solve("perspective (clean reverted)")
         else:
             print(f"[stage2] solve is {err:.2f} px — skipping the clean pass "
                   f"(only runs above {clean_above:g} px)")
