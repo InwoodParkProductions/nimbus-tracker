@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
+<defs>
+  <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#3f97dd"/>
+    <stop offset=".38" stop-color="#8fd0f4"/>
+    <stop offset=".62" stop-color="#d8f2fb"/>
+    <stop offset=".75" stop-color="#eefaf0"/>
+  </linearGradient>
+  <radialGradient id="sun" cx=".5" cy=".5" r=".5">
+    <stop offset="0" stop-color="#fffdf0" stop-opacity=".95"/>
+    <stop offset=".35" stop-color="#fff3c4" stop-opacity=".7"/>
+    <stop offset="1" stop-color="#fff3c4" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="farhill" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#b3dcc6"/><stop offset="1" stop-color="#9ccfb4"/>
+  </linearGradient>
+  <linearGradient id="midhill" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#9ad57f"/><stop offset="1" stop-color="#77bf62"/>
+  </linearGradient>
+  <linearGradient id="nearhill" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#8ccf63"/><stop offset="1" stop-color="#57ab45"/>
+  </linearGradient>
+  <linearGradient id="fg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#63b04c"/><stop offset="1" stop-color="#3f8f37"/>
+  </linearGradient>
+  <linearGradient id="tower" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#ffffff"/><stop offset=".55" stop-color="#f2f9fd"/>
+    <stop offset="1" stop-color="#d5e8f2"/>
+  </linearGradient>
+  <linearGradient id="glassband" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#bfe4f7"/><stop offset="1" stop-color="#8ec8ea"/>
+  </linearGradient>
+  <linearGradient id="river" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#bfe8f5"/><stop offset="1" stop-color="#8fd0ec"/>
+  </linearGradient>
+</defs>
+
+<!-- sky + sun -->
+<rect width="1600" height="1000" fill="url(#sky)"/>
+<circle cx="1235" cy="185" r="330" fill="url(#sun)"/>
+<circle cx="1235" cy="185" r="72" fill="#fffbe8" opacity=".95"/>
+
+<!-- clouds -->
+<g fill="#ffffff">
+  <g opacity=".75"><ellipse cx="300" cy="170" rx="120" ry="30"/>
+    <ellipse cx="380" cy="150" rx="80" ry="26"/><ellipse cx="230" cy="152" rx="70" ry="22"/></g>
+  <g opacity=".6"><ellipse cx="800" cy="110" rx="95" ry="24"/>
+    <ellipse cx="865" cy="95" rx="60" ry="19"/></g>
+  <g opacity=".55"><ellipse cx="1430" cy="330" rx="100" ry="24"/>
+    <ellipse cx="1495" cy="315" rx="60" ry="18"/></g>
+  <g opacity=".5"><ellipse cx="580" cy="300" rx="75" ry="18"/></g>
+</g>
+
+<!-- far hills -->
+<path d="M0 640 Q 250 545 520 610 T 1050 600 T 1600 615 V 1000 H 0 Z" fill="url(#farhill)"/>
+
+<!-- wind turbines on far hill -->
+<g stroke="#ffffff" stroke-width="7" stroke-linecap="round">
+  <line x1="1180" y1="595" x2="1180" y2="472"/>
+  <line x1="1345" y1="620" x2="1345" y2="515"/>
+</g>
+<g fill="#ffffff">
+  <g transform="translate(1180 472)">
+    <g><ellipse cx="0" cy="-38" rx="7" ry="40"/></g>
+    <g transform="rotate(120)"><ellipse cx="0" cy="-38" rx="7" ry="40"/></g>
+    <g transform="rotate(240)"><ellipse cx="0" cy="-38" rx="7" ry="40"/></g>
+    <circle r="9" fill="#eef7fc"/>
+  </g>
+  <g transform="translate(1345 515) rotate(40)">
+    <g><ellipse cx="0" cy="-31" rx="6" ry="33"/></g>
+    <g transform="rotate(120)"><ellipse cx="0" cy="-31" rx="6" ry="33"/></g>
+    <g transform="rotate(240)"><ellipse cx="0" cy="-31" rx="6" ry="33"/></g>
+    <circle r="8" fill="#eef7fc"/>
+  </g>
+</g>
+
+<!-- mid hills + eco city -->
+<path d="M0 705 Q 300 630 640 675 T 1200 668 T 1600 690 V 1000 H 0 Z" fill="url(#midhill)"/>
+
+<g>
+  <!-- curved white towers with green terraces -->
+  <path d="M560 668 C 552 560 568 480 588 452 C 608 480 624 560 616 668 Z" fill="url(#tower)"/>
+  <rect x="562" y="560" width="52" height="14" rx="7" fill="url(#glassband)" opacity=".85"/>
+  <ellipse cx="588" cy="452" rx="26" ry="10" fill="#6fbf5c"/>
+  <path d="M660 672 C 650 540 668 430 694 396 C 720 430 738 540 728 672 Z" fill="url(#tower)"/>
+  <rect x="664" y="520" width="60" height="16" rx="8" fill="url(#glassband)" opacity=".85"/>
+  <rect x="668" y="586" width="52" height="14" rx="7" fill="url(#glassband)" opacity=".7"/>
+  <ellipse cx="694" cy="396" rx="30" ry="11" fill="#5fb54e"/>
+  <ellipse cx="694" cy="396" rx="18" ry="7" fill="#7ecf6a"/>
+  <path d="M775 670 C 768 570 780 500 798 474 C 816 500 828 570 821 670 Z" fill="url(#tower)"/>
+  <rect x="776" y="556" width="44" height="13" rx="6.5" fill="url(#glassband)" opacity=".8"/>
+  <ellipse cx="798" cy="474" rx="23" ry="9" fill="#6fbf5c"/>
+  <!-- glass dome -->
+  <path d="M868 668 A 46 40 0 0 1 960 668 Z" fill="#dcf1fb" opacity=".9"/>
+  <path d="M868 668 A 46 40 0 0 1 960 668" fill="none" stroke="#ffffff" stroke-width="4"/>
+  <ellipse cx="914" cy="668" rx="52" ry="8" fill="#5fae4d"/>
+  <!-- hanging gardens between towers -->
+  <path d="M616 610 Q 640 622 664 612" stroke="#5fb54e" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <path d="M728 596 Q 752 608 776 598" stroke="#5fb54e" stroke-width="6" fill="none" stroke-linecap="round"/>
+</g>
+
+<!-- solar terraces on left slope -->
+<g transform="translate(150 640) skewX(-12)">
+  <g fill="#2e6db4" stroke="#eaf6fd" stroke-width="2.5">
+    <rect x="0" y="0" width="54" height="30" rx="3"/>
+    <rect x="62" y="0" width="54" height="30" rx="3"/>
+    <rect x="124" y="0" width="54" height="30" rx="3"/>
+    <rect x="14" y="40" width="54" height="30" rx="3"/>
+    <rect x="76" y="40" width="54" height="30" rx="3"/>
+    <rect x="138" y="40" width="54" height="30" rx="3"/>
+  </g>
+  <rect x="0" y="0" width="192" height="14" rx="3" fill="#ffffff" opacity=".35"/>
+</g>
+
+<!-- near hills -->
+<path d="M0 800 Q 350 720 750 775 T 1600 780 V 1000 H 0 Z" fill="url(#nearhill)"/>
+<!-- trees -->
+<g>
+  <g transform="translate(260 768)"><rect x="-5" y="0" width="10" height="26" rx="4" fill="#7a5b3e"/>
+    <circle cx="0" cy="-16" r="26" fill="#4f9e3f"/><circle cx="-18" cy="-4" r="18" fill="#5cad4a"/>
+    <circle cx="18" cy="-4" r="18" fill="#5cad4a"/><ellipse cx="-8" cy="-24" rx="12" ry="8" fill="#8fd668" opacity=".8"/></g>
+  <g transform="translate(1290 792) scale(.85)"><rect x="-5" y="0" width="10" height="26" rx="4" fill="#7a5b3e"/>
+    <circle cx="0" cy="-16" r="26" fill="#4f9e3f"/><circle cx="-18" cy="-4" r="18" fill="#5cad4a"/>
+    <circle cx="18" cy="-4" r="18" fill="#5cad4a"/><ellipse cx="-8" cy="-24" rx="12" ry="8" fill="#8fd668" opacity=".8"/></g>
+  <g transform="translate(1445 812) scale(.7)"><rect x="-5" y="0" width="10" height="26" rx="4" fill="#7a5b3e"/>
+    <circle cx="0" cy="-16" r="26" fill="#4f9e3f"/><circle cx="18" cy="-4" r="18" fill="#5cad4a"/></g>
+</g>
+
+<!-- foreground meadow -->
+<path d="M0 905 Q 400 845 900 885 T 1600 880 V 1000 H 0 Z" fill="url(#fg)"/>
+<g fill="#ffffff" opacity=".5">
+  <circle cx="150" cy="930" r="4"/><circle cx="185" cy="948" r="3"/>
+  <circle cx="520" cy="915" r="4"/><circle cx="560" cy="935" r="3"/>
+  <circle cx="1210" cy="930" r="4"/><circle cx="1245" cy="948" r="3"/>
+</g>
+
+<!-- aero bubbles -->
+<g fill="#ffffff">
+  <circle cx="1120" cy="450" r="26" opacity=".18"/>
+  <circle cx="1165" cy="405" r="12" opacity=".22"/>
+  <circle cx="440" cy="380" r="20" opacity=".15"/>
+  <circle cx="480" cy="345" r="9" opacity=".2"/>
+  <circle cx="90" cy="500" r="15" opacity=".15"/>
+</g>
+</svg>

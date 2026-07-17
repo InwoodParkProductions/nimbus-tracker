@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <!-- Nimbus Tracker backdrop — flat City-Pop seaside, after Hiroshi Nagai -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e4fa8"/>
+      <stop offset=".55" stop-color="#1f6fd0"/>
+      <stop offset="1" stop-color="#5aa7e8"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f8fb4"/>
+      <stop offset="1" stop-color="#0a6f97"/>
+    </linearGradient>
+  </defs>
+
+  <!-- sky -->
+  <rect width="1920" height="760" fill="url(#sky)"/>
+
+  <!-- far cloud bank, hugging the horizon -->
+  <g fill="#eaf4fb">
+    <ellipse cx="240" cy="720" rx="300" ry="60"/>
+    <ellipse cx="700" cy="730" rx="380" ry="55"/>
+    <ellipse cx="1300" cy="725" rx="420" ry="60"/>
+    <ellipse cx="1790" cy="730" rx="300" ry="52"/>
+  </g>
+
+  <!-- monumental cumulus, hard-edged and flat -->
+  <g>
+    <g fill="#ffffff">
+      <ellipse cx="1465" cy="560" rx="200" ry="105"/>
+      <ellipse cx="1330" cy="620" rx="150" ry="85"/>
+      <ellipse cx="1610" cy="625" rx="165" ry="90"/>
+      <ellipse cx="1520" cy="470" rx="120" ry="75"/>
+      <ellipse cx="1395" cy="500" rx="95" ry="60"/>
+      <rect x="1180" y="640" width="600" height="80"/>
+    </g>
+    <g fill="#cfe4f4">
+      <ellipse cx="1355" cy="690" rx="150" ry="26"/>
+      <ellipse cx="1600" cy="695" rx="160" ry="24"/>
+      <ellipse cx="1462" cy="640" rx="90" ry="18"/>
+    </g>
+  </g>
+
+  <g>
+    <g fill="#ffffff">
+      <ellipse cx="430" cy="500" rx="170" ry="88"/>
+      <ellipse cx="310" cy="560" rx="120" ry="66"/>
+      <ellipse cx="560" cy="560" rx="130" ry="70"/>
+      <ellipse cx="470" cy="425" rx="90" ry="55"/>
+      <rect x="200" y="580" width="440" height="60"/>
+    </g>
+    <g fill="#cfe4f4">
+      <ellipse cx="330" cy="625" rx="115" ry="20"/>
+      <ellipse cx="545" cy="628" rx="120" ry="19"/>
+    </g>
+  </g>
+
+  <!-- small drifting clouds -->
+  <g fill="#ffffff" opacity=".96">
+    <ellipse cx="900" cy="260" rx="95" ry="26"/>
+    <ellipse cx="965" cy="240" rx="60" ry="20"/>
+    <ellipse cx="1740" cy="180" rx="80" ry="20"/>
+    <ellipse cx="150" cy="200" rx="70" ry="18"/>
+    <ellipse cx="1120" cy="420" rx="70" ry="16"/>
+  </g>
+
+  <!-- sea -->
+  <rect y="758" width="1920" height="322" fill="url(#sea)"/>
+  <rect y="756" width="1920" height="5" fill="#e8f6ff" opacity=".85"/>
+  <!-- glints -->
+  <g fill="#7fd4e8" opacity=".7">
+    <rect x="180" y="820" width="150" height="6" rx="3"/>
+    <rect x="420" y="860" width="90" height="5" rx="2.5"/>
+    <rect x="1500" y="835" width="130" height="6" rx="3"/>
+    <rect x="1180" y="880" width="80" height="5" rx="2.5"/>
+  </g>
+
+  <!-- white terrace, bottom left: flat modernism with one dark window -->
+  <g>
+    <rect x="-40" y="900" width="620" height="180" fill="#fdfdf8"/>
+    <rect x="-40" y="900" width="620" height="14" fill="#e2ecf2"/>
+    <rect x="60" y="946" width="150" height="92" fill="#12324e"/>
+    <rect x="60" y="946" width="150" height="10" fill="#0b2338"/>
+    <rect x="300" y="960" width="200" height="10" fill="#ff7d6e"/>
+    <rect x="300" y="990" width="200" height="10" fill="#17b3c1"/>
+    <rect x="536" y="900" width="12" height="180" fill="#dbe7ee"/>
+  </g>
+
+  <!-- pool wedge, bottom right -->
+  <g>
+    <polygon points="1290,1080 1920,1080 1920,955 1420,975" fill="#28c3dd"/>
+    <polygon points="1290,1080 1440,1080 1920,962 1920,955 1420,975" fill="#eefcff"/>
+    <ellipse cx="1700" cy="1030" rx="90" ry="9" fill="#8fe9f6"/>
+  </g>
+
+  <!-- palm: flat, black-green, leaning in from the pool corner -->
+  <g fill="#0d2a25">
+    <path d="M1704 1000 q10 -210 -52 -356 l22 -7 q82 136 58 363 z"/>
+    <g transform="translate(1668,640) rotate(-8)">
+      <path d="M0 0 q-135 -72 -220 -30 q95 -48 226 10 q-60 14 -6 20 z"/>
+      <path d="M4 -2 q-64 -126 -168 -148 q118 2 180 128 q-30 6 -12 20 z"/>
+      <path d="M8 -2 q32 -134 134 -166 q-88 66 -108 172 q-14 -10 -26 -6 z"/>
+      <path d="M10 2 q134 -62 216 -6 q-100 -30 -214 30 q10 -14 -2 -24 z"/>
+      <path d="M6 6 q100 66 116 158 q-56 -90 -130 -136 q18 -8 14 -22 z"/>
+      <path d="M0 6 q-92 62 -104 156 q36 -102 118 -138 q-16 -6 -14 -18 z"/>
+      <ellipse cx="4" cy="0" rx="18" ry="14"/>
+    </g>
+  </g>
+  <!-- lone sail on the horizon -->
+  <g>
+    <polygon points="985,752 985,700 955,752" fill="#ffffff"/>
+    <polygon points="992,752 992,712 1014,752" fill="#f3d9d2"/>
+    <rect x="950" y="752" width="70" height="6" fill="#123047"/>
+  </g>
+
+</svg>

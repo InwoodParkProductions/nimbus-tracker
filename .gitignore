@@ -1,0 +1,20 @@
+# Dev environment — recreate with:
+#   py -3.13 -m venv .venv
+#   .venv\Scripts\pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+#   .venv\Scripts\pip install -r requirements.txt
+.venv/
+
+# Junction to the Blender that ships with the packaged app — not ours to track
+blender/
+
+# PyInstaller output
+dist/
+build/
+
+__pycache__/
+*.pyc
+
+# AI model weights. Excluded on purpose: yolo11x-seg.pt is 125 MB, over
+# GitHub's 100 MB per-file limit, and the weights never change. Restore them
+# from "Nimbus Tracker Source Kit.zip" if this tree is ever cloned fresh.
+*.pt

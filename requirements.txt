@@ -1,0 +1,13 @@
+# Nimbus Tracker — Python dependencies (Python 3.13)
+# GPU builds of torch come from the CUDA index; install order matters:
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements.txt
+# (On a machine with no NVIDIA GPU, plain `pip install torch torchvision` is fine.)
+flask==3.1.3
+opencv-python
+numpy>=2.3
+ultralytics==8.4.87
+scenedetect==0.7
+pywebview==6.2.1
+pythonnet==3.1.0
+pyinstaller==6.21.0

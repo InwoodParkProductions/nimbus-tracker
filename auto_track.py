@@ -1,0 +1,518 @@
+"""
+auto_track.py — one command for the whole pipeline.
+====================================================
+Run with the SYSTEM python from the auto-track folder:
+
+  Step 1: see what shots are in your footage (fast, nothing heavy runs):
+      python auto_track.py "path\\to\\footage.mov"
+
+  Step 2: track one shot (and optionally hand off + render):
+      python auto_track.py "path\\to\\footage.mov" --shot 3
+          [--scene my_scene.blend --start 0,-8,2]     -> bakes camera into your scene
+          [--render out.mp4 --engine cycles --samples 64 --percent 50]
+          [--rotation rx,ry,rz] [--scale s]           -> orient/scale the path
+          [--tracking-settings '{"motion_model": "LocRotScale"}']
+
+Everything lands in a work folder next to the footage:
+    <footage_dir>/<footage_name>_autotrack/
+        shots/            shot_NN.mp4 + shots.json
+        shot_NN_masks/    person masks
+        shot_NN_out/      *_track_log.json (solve error!) + tracked .blend
+        scene_tracked.blend, render output       (if requested)
+"""
+
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def find_blender():
+    """Locate blender.exe across the places it commonly installs, so the app
+    works on a fresh machine without hand-configuring anything:
+      1. AEROTRACK_BLENDER env var (explicit override)
+      2. blender on PATH
+      3. Program Files / Steam / per-user install folders (newest version)
+    Returns 'blender' as a last resort (may be on PATH under another name)."""
+    import shutil
+    env = os.environ.get("AEROTRACK_BLENDER")
+    if env and os.path.exists(env):
+        return env
+    # bundled Blender ships inside the app folder — the all-in-one install
+    # needs nothing from the machine
+    exe_dir = (os.path.dirname(sys.executable)
+               if getattr(sys, "frozen", False) else HERE)
+    for cand in (os.path.join(exe_dir, "blender", "blender.exe"),
+                 os.path.join(os.path.dirname(exe_dir),
+                              "blender", "blender.exe")):
+        if os.path.exists(cand):
+            return cand
+    on_path = shutil.which("blender")
+    if on_path:
+        return on_path
+    roots = [
+        r"C:\Program Files\Blender Foundation",
+        r"C:\Program Files (x86)\Blender Foundation",
+        r"C:\Program Files\Steam\steamapps\common\Blender",
+        r"C:\Program Files (x86)\Steam\steamapps\common\Blender",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     r"Programs\Blender Foundation"),
+    ]
+    candidates = []
+    for root in roots:
+        if not root:
+            continue
+        candidates += glob.glob(os.path.join(root, "Blender *", "blender.exe"))
+        candidates += glob.glob(os.path.join(root, "blender.exe"))
+    if candidates:
+        return sorted(candidates)[-1]  # newest version
+    return "blender"  # hope it's on PATH
+
+
+DEFAULT_BLENDER = find_blender()
+
+
+def py_cmd(module):
+    """Command prefix to run one of our pipeline modules as a subprocess.
+    Works from source AND inside a frozen (PyInstaller) app, where there is
+    no python.exe — the app re-invokes itself with --run <module>."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--run", module]
+    return [sys.executable, os.path.join(HERE, module + ".py")]
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Clip -> person-masked camera track -> your Blender scene -> render.")
+    p.add_argument("footage", help="Video file (edited sequences are fine; they get split)")
+    p.add_argument("--shot", type=int, help="Which shot number to track (omit to just list shots)")
+    p.add_argument("--scene", help="Your .blend to put the tracked camera into")
+    p.add_argument("--start", default="0,0,0", help="Camera position at first frame, e.g. 0,-8,2")
+    p.add_argument("--rotation", default="0,0,0", help="Extra path rotation in degrees")
+    p.add_argument("--scale", default="1.0", help="Scale of the camera motion")
+    p.add_argument("--render", help="Render output (.mp4 = video, no extension = PNG sequence)")
+    p.add_argument("--engine", default="eevee", help="cycles | eevee | workbench")
+    p.add_argument("--samples", help="Render samples")
+    p.add_argument("--percent", help="Resolution percentage")
+    p.add_argument("--frames", help="Render frame range A-B")
+    p.add_argument("--transparent", action="store_true", help="Transparent background (PNG output)")
+    p.add_argument("--tracking-settings", default='{"motion_model": "LocRotScale", "pattern_size": 31, "clean_error_threshold": 3.0}',
+                   help="JSON tracking settings passed to stage 2")
+    p.add_argument("--lens-mm", help="Known lens focal length (mm). If set, "
+                   "the solver uses it as a fixed known value instead of "
+                   "refining focal length.")
+    p.add_argument("--focus-distance", help="Camera depth-of-field focus "
+                   "distance (scene units) for the final camera.")
+    p.add_argument("--static", action="store_true",
+                   help="Treat the shot as locked-off: place a static camera "
+                        "at --start/--rotation instead of solving. Without "
+                        "this flag the shot's motion is measured and the "
+                        "static path is chosen automatically when there is "
+                        "no camera movement.")
+    p.add_argument("--masking-model", default="best",
+                   help="Person-masking model: 'fast' (yolo11n, quick) or "
+                        "'best' (yolo11x, detects costumes/unusual figures — "
+                        "slower but far more reliable). Default best.")
+    p.add_argument("--blender", default=DEFAULT_BLENDER, help="Path to blender.exe")
+    return p.parse_args()
+
+
+def resolve_masking_model(choice):
+    """Map fast/best to the bundled model file (falls back to name so
+    ultralytics downloads it if the file isn't present)."""
+    name = {"fast": "yolo11n-seg.pt", "best": "yolo11x-seg.pt"}.get(
+        choice, choice)
+    local = os.path.join(HERE, name)
+    return local if os.path.exists(local) else name
+
+
+def _inherit_io():
+    """Explicit stdout/stderr handles for child processes (Blender, the
+    masking/flow steps). In the frozen windowed app the default handle
+    inheritance drops them, so child output would vanish and the render
+    queue's live progress parser would see nothing. Passing our own streams
+    (they wrap real OS fds — the queue's pipe, or the log file) makes every
+    child's output flow to whoever is watching."""
+    kw = {}
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        try:
+            stream.flush()
+            stream.fileno()          # must be a real OS handle
+            kw[name] = stream
+        except Exception:
+            pass                     # no usable handle — let the child default
+    return kw
+
+
+def run(cmd, what):
+    print(f"\n=== {what} ===")
+    result = subprocess.run(cmd, **_inherit_io())
+    if result.returncode != 0:
+        sys.exit(f"FAILED at: {what} (exit {result.returncode}). See output above.")
+
+
+def do_render(args, scene_out):
+    """Stage 4 with an engine safety net: try the chosen engine, and if
+    Cycles can't run on this machine (no GPU/driver, out of memory, …) fall
+    back to Eevee so the shot still produces a video. Returns True when the
+    output file landed."""
+    if not args.render:
+        return True
+    if not scene_out:
+        print("[warn] --render needs a scene; skipping render")
+        return False
+    render_path = os.path.abspath(args.render)
+    engines = [args.engine]
+    if args.engine.lower() == "cycles":
+        engines.append("eevee")
+    for eng in engines:
+        # windowed (no -b): you can watch the render happen live in Blender's
+        # own window; render_stage4.py closes it automatically when done.
+        # --factory-startup: don't load the user's addons into the render
+        # window (asset-library addons poll servers and slow the render).
+        cmd = [args.blender, "--factory-startup", scene_out,
+               "-P", os.path.join(HERE, "render_stage4.py"), "--",
+               "--out", render_path, "--engine", eng]
+        for flag in ("samples", "percent", "frames"):
+            if getattr(args, flag):
+                cmd += ["--" + flag, getattr(args, flag)]
+        if args.transparent:
+            cmd.append("--transparent")
+        if run_ok(cmd, f"Stage 4: rendering ({eng})") and \
+                os.path.exists(render_path):
+            return True
+        print(f"[warn] render with {eng} failed"
+              + (" — trying Eevee" if eng != engines[-1] else ""))
+    print("[warn] rendering did not complete")
+    return False
+
+
+STAGE_TIMES = []  # (label, seconds) — printed as a breakdown at DONE
+
+
+def run_ok(cmd, what):
+    """Run a stage but DON'T abort on failure — return True/False so the
+    caller can fall back. Used for every stage that has a safety net, so a
+    single crashing shot never kills the batch: it degrades to the next
+    approach (3D solve -> 2D flow -> static hold; Cycles -> Eevee)."""
+    print(f"\n=== {what} ===")
+    t0 = time.time()
+    try:
+        ok = subprocess.run(cmd, **_inherit_io()).returncode == 0
+    except Exception as e:
+        print(f"[warn] {what} could not run: {e}")
+        ok = False
+    dt = time.time() - t0
+    STAGE_TIMES.append((what, dt))
+    print(f"[timing] {what}: {dt:.0f}s")
+    return ok
+
+
+def print_timing_summary():
+    if not STAGE_TIMES:
+        return
+    total = sum(t for _, t in STAGE_TIMES)
+    print("\nWhere the time went:")
+    for label, t in STAGE_TIMES:
+        print(f"  {t:6.0f}s  ({100 * t / max(total, 0.01):3.0f}%)  {label}")
+    print(f"  {total:6.0f}s  total")
+
+
+def shot_motion(footage, start, end, gap=12, windows=4):
+    """Motion estimate inside a shot: median tracked-feature displacement
+    over `gap` frames (px at 1024w), max across sample windows.
+
+    Uses optical flow on feature points rather than whole-frame phase
+    correlation — push-ins, pull-outs, zooms and rotations move features
+    radially with near-zero NET shift, so phase correlation reports them
+    as static (missed 2 of 4 moving shots on real footage)."""
+    import cv2
+    import numpy as np
+
+    def grab(cap, idx, w=1024):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx - 1)
+        ok, f = cap.read()
+        if not ok:
+            return None
+        h = int(f.shape[0] * w / f.shape[1])
+        return cv2.cvtColor(cv2.resize(f, (w, h)), cv2.COLOR_BGR2GRAY)
+
+    n = end - start + 1
+    if n < gap + 2:
+        gap = max(2, n - 2)
+    cap = cv2.VideoCapture(footage)
+    positions = np.linspace(start, end - gap,
+                            min(windows, max(1, n // gap))).astype(int)
+    per_window = []
+    for pos in positions:
+        a = grab(cap, int(pos))
+        b = grab(cap, int(pos) + gap)
+        if a is None or b is None:
+            continue
+        pts = cv2.goodFeaturesToTrack(a, maxCorners=200, qualityLevel=0.01,
+                                      minDistance=12)
+        if pts is None or len(pts) < 10:
+            continue
+        nxt, st, _ = cv2.calcOpticalFlowPyrLK(a, b, pts, None,
+                                              winSize=(21, 21), maxLevel=3)
+        good = st.ravel() == 1
+        if good.sum() < 10:
+            continue
+        disp = np.linalg.norm((nxt - pts).reshape(-1, 2)[good], axis=1)
+        per_window.append(float(np.median(disp)))
+    cap.release()
+    return max(per_window) if per_window else None
+
+
+def main():
+    args = parse_args()
+    footage = os.path.abspath(args.footage)
+    if not os.path.exists(footage):
+        sys.exit(f"Footage not found: {footage}")
+
+    base = os.path.splitext(os.path.basename(footage))[0].replace(" ", "_")
+    workdir = os.path.join(os.path.dirname(footage), base + "_autotrack")
+    shots_dir = os.path.join(workdir, "shots")
+    shots_json = os.path.join(shots_dir, "shots.json")
+
+    # ---- Stage 0: split into shots (reused if already done) ----
+    if not os.path.exists(shots_json):
+        run(py_cmd("split_shots") + [footage, shots_dir],
+            "Stage 0: splitting footage into shots")
+    with open(shots_json) as f:
+        shots_data = json.load(f)
+    shots = shots_data["shots"]
+    source_size = shots_data.get("size")  # original plate resolution
+
+    # ---- No --shot: list shots with a motion estimate and stop ----
+    if args.shot is None:
+        print(f"\n{len(shots)} shot(s) found in {os.path.basename(footage)}:\n")
+        for s in shots:
+            m = shot_motion(footage, s["frame_start"], s["frame_end"])
+            move = "?" if m is None else f"{m:.1f}"
+            verdict = ("  <- static, can't be 3D-tracked" if m is not None and m < 2.0
+                       else "")
+            print(f"  shot {s['shot']}: frames {s['frame_start']}-{s['frame_end']}"
+                  f" ({s['num_frames']} frames), camera motion ~{move} px{verdict}")
+        print(f"\nPick a moving shot and re-run with:  --shot N")
+        return
+
+    shot = next((s for s in shots if s["shot"] == args.shot), None)
+    if shot is None:
+        sys.exit(f"No shot {args.shot}; footage has shots 1-{len(shots)}")
+    shot_file = shot.get("file") or os.path.join(shots_dir, f"shot_{args.shot:02d}.mp4")
+    tag = f"shot_{args.shot:02d}"
+
+    # ---- First decision: does the camera move at all? ----
+    # Static shot -> place a locked-off camera at the chosen pose, no solve.
+    # Moving shot -> 3D track, falling back to the 2D motion match.
+    # If static placement fails for any reason, fall through to the tracking
+    # chain — its own fallbacks guarantee the shot still gets a camera.
+    if args.scene:
+        is_static = args.static
+        if not is_static:
+            try:
+                m = shot_motion(footage, shot["frame_start"], shot["frame_end"])
+            except Exception as e:  # can't measure -> assume moving, track it
+                print(f"[warn] motion measurement failed ({e}) — "
+                      "treating the shot as moving")
+                m = None
+            if m is not None and m < 2.0:
+                is_static = True
+                print(f"\nShot {args.shot} has ~{m:.1f}px of camera motion — "
+                      "treating it as a locked-off (static) shot.")
+        if is_static:
+            scene = os.path.abspath(args.scene)
+            base = os.path.splitext(os.path.basename(scene))[0]
+            scene_out = os.path.join(workdir, f"{tag}_{base}_tracked.blend")
+            out_dir = os.path.join(workdir, tag + "_out")
+            os.makedirs(out_dir, exist_ok=True)
+            place = [args.blender, "-b", scene,
+                     "-P", os.path.join(HERE, "place_static.py"), "--",
+                     "--footage", shot_file,
+                     "--start", args.start, "--rotation", args.rotation,
+                     "--frames", str(shot["num_frames"]),
+                     "--out", scene_out,
+                     "--log", os.path.join(out_dir,
+                                           tag + "_masked_track_log.json")]
+            if args.lens_mm:
+                place += ["--focal-mm", args.lens_mm]
+            if args.focus_distance:
+                place += ["--focus-distance", args.focus_distance]
+            if source_size:
+                place += ["--render-size", f"{source_size[0]}x{source_size[1]}"]
+            if run_ok(place, "Static shot: placing locked-off camera") and \
+                    os.path.exists(scene_out):
+                do_render(args, scene_out)
+                print("\n=== DONE ===")
+                print(f"Work folder:     {workdir}")
+                print("Solve:           locked-off static camera (no motion)")
+                print(f"Your scene:      {scene_out}  (camera: TrackedCamera)")
+                if args.render:
+                    print(f"Render:          {os.path.abspath(args.render)}")
+                print_timing_summary()
+                return
+            print("[warn] static placement failed — falling back to the "
+                  "tracking chain")
+
+    # ---- Stage 1: person masks (reused if already done) ----
+    # best = SAM2 silhouette tracking seeded+unioned with yolo11x (temporally
+    # stable, catches costumes); fast = classic per-frame yolo11n.
+    masks_dir = os.path.join(workdir, tag + "_masks")
+    if not os.path.exists(os.path.join(masks_dir, "manifest.json")):
+        engine = "yolo" if args.masking_model == "fast" else "sam2"
+        run_ok(py_cmd("segment_people") + [shot_file, masks_dir,
+                                           "--engine", engine,
+                                           "--model", resolve_masking_model(args.masking_model)],
+               "Stage 1: learning person vs background (AI masking)")
+    use_masks = os.path.exists(os.path.join(masks_dir, "manifest.json"))
+    if not use_masks:
+        print("[warn] person masking unavailable — tracking the whole frame")
+
+    # ---- Stage 2: track + solve ----
+    out_dir = os.path.join(workdir, tag + "_out")
+    tset = json.loads(args.tracking_settings)
+    if args.lens_mm:  # known lens: use it fixed, don't refine focal length
+        tset["focal_length_mm"] = float(args.lens_mm)
+        tset["refine_focal"] = False
+    stage2_cmd = [args.blender, "-b", os.path.join(HERE, "template.blend"),
+                  "-P", os.path.join(HERE, "auto_track_stage2.py"), "--",
+                  shot_file, out_dir]
+    if use_masks:
+        stage2_cmd += ["--masks", masks_dir]
+    stage2_cmd += ["--settings", json.dumps(tset)]
+    stage2_ok = run_ok(stage2_cmd,
+                       "Stage 2: tracking camera against the background")
+
+    log_path = os.path.join(out_dir, tag + "_masked_track_log.json")
+    metrics, err = {}, None
+    if stage2_ok:
+        try:
+            with open(log_path) as f:
+                metrics = json.load(f)
+            err = metrics.get("average_solve_error")
+        except Exception:
+            err = None
+    if not stage2_ok or err is None:
+        print("[warn] 3D tracking didn't produce a usable solve — falling back "
+              "to the 2D motion match")
+    mode = metrics.get("solve_mode", "perspective")
+    tracked_blend = os.path.join(out_dir, tag + "_masked_tracked.blend")
+    flow_json = None
+    # A 3D solve worse than this jitters too much to trust; treat it as a
+    # failure and hand the shot to the best-effort 2D motion match instead —
+    # a faux camera that follows the movement beats a garbage 3D one.
+    BAD_SOLVE_PX = 8.0
+    solve_failed = err is None or err != err        # no 3D solve at all
+    solve_unusable = solve_failed or err >= BAD_SOLVE_PX
+    solve_3d_error = None if solve_failed else err   # keep for the log
+    if solve_unusable:                               # try the 2D flow fallback
+        reason = ("3D solve not possible" if solve_failed
+                  else f"3D solve too rough ({err:.1f}px) to trust")
+        print(f"\n{reason} — using 2D flow motion match instead…")
+        flow_json = os.path.join(out_dir, tag + "_flow_solve.json")
+        os.makedirs(out_dir, exist_ok=True)
+        flow_cmd = py_cmd("flow_solve") + [shot_file, flow_json]
+        if use_masks:
+            flow_cmd += ["--masks", masks_dir]
+        flow_ok = run_ok(flow_cmd, "Stage 2c: 2D flow solve (approximate)")
+        if not flow_ok or not os.path.exists(flow_json):
+            # absolute last resort: a static hold that cannot fail, so the
+            # shot still yields a usable (if motionless) camera + render
+            print("[warn] flow solve failed — using a static hold camera")
+            nf = shot["num_frames"]
+            with open(flow_json, "w") as f:
+                json.dump({"solver": "static-hold", "num_frames": nf,
+                           "fps": 24.0, "size": source_size or [1920, 1080],
+                           "focal_mm": float(args.lens_mm) if args.lens_mm else 35.0,
+                           "sensor_width_mm": 36.0,
+                           "quaternions_wxyz": [[1.0, 0.0, 0.0, 0.0]] * nf,
+                           "scale_cum": [1.0] * nf,
+                           "median_residual_px": None,
+                           "frames_without_flow": nf}, f)
+        with open(flow_json) as f:
+            flow = json.load(f)
+        residual = flow.get("median_residual_px")
+        held = flow.get("frames_without_flow", 0)
+        held_frac = held / max(flow["num_frames"], 1)
+        # Every shot gets a camera; the label carries the honesty. Extreme
+        # blur hides CG imprecision anyway — a loose match beats a refusal.
+        if residual is None:
+            tier = "static hold — motion was unmeasurable on this shot"
+        elif held_frac > 0.5:
+            tier = (f"partial — flow lost on {held_frac:.0%} of frames "
+                    "(camera holds through the gaps)")
+        elif residual > 25.0:
+            tier = "very loose — extreme motion blur"
+        elif residual > 10.0:
+            tier = "loose"
+        else:
+            tier = "good"
+        err = residual if residual is not None else 99.0
+        mode = "2d-flow"
+        metrics.update(solve_mode="2d-flow", average_solve_error=err,
+                       solve_ok=True, flow_json=flow_json, flow_tier=tier,
+                       fell_back_from_3d=(not solve_failed),
+                       rejected_3d_error=solve_3d_error)
+        with open(log_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+    if mode == "2d-flow":
+        quality = (f"APPROXIMATE 2D motion match ({metrics.get('flow_tier', '')}) "
+                   "— CG follows the camera's movement feel; right for "
+                   "blurred/close-up shots, not for locked floor contact")
+    else:
+        quality = ("EXCELLENT (production-grade)" if err < 1.0 else
+                   "GOOD (small drift possible)" if err < 3.0 else
+                   "ROUGH (visible drift likely — hard shot)" if err < 8.0 else
+                   "BAD (don't use this solve)")
+        if mode == "tripod":
+            quality += " [rotation-only tripod solve — camera pans in place]"
+    print(f"\nSolve error: {err:.2f} px -> {quality}")
+
+    # ---- Stage 3: bake camera into the user's scene ----
+    scene_out = None
+    if args.scene:
+        scene = os.path.abspath(args.scene)
+        scene_out = os.path.join(workdir, tag + "_" +
+                                 os.path.splitext(os.path.basename(scene))[0] + "_tracked.blend")
+        cmd3 = [args.blender, "-b", scene,
+                "-P", os.path.join(HERE, "apply_track_stage3.py"), "--"]
+        if flow_json:
+            cmd3 += ["--flow", flow_json, "--footage", shot_file]
+        else:
+            cmd3 += [tracked_blend]
+        # stage3 uses manual opt() parsing (handles leading '-' fine), so
+        # pass separate tokens here — NOT the =value form.
+        cmd3 += ["--start", args.start, "--rotation", args.rotation,
+                 "--scale", args.scale, "--out", scene_out]
+        if args.lens_mm:
+            cmd3 += ["--lens-mm", args.lens_mm]
+        if args.focus_distance:
+            cmd3 += ["--focus-distance", args.focus_distance]
+        if source_size:  # tracking ran on a proxy; render at plate resolution
+            cmd3 += ["--render-size", f"{source_size[0]}x{source_size[1]}"]
+        if not run_ok(cmd3, "Stage 3: baking camera into your scene"):
+            print("[warn] baking the camera into your scene failed")
+            scene_out = None  # nothing to render
+
+    # ---- Stage 4: render ----
+    do_render(args, scene_out)
+
+    print("\n=== DONE ===")
+    print(f"Work folder:     {workdir}")
+    print(f"Solve:           {err:.2f} px ({quality})")
+    print(f"Tracked blend:   {tracked_blend}")
+    if scene_out:
+        print(f"Your scene:      {scene_out}  (camera: TrackedCamera)")
+    if args.render:
+        print(f"Render:          {os.path.abspath(args.render)}")
+    print_timing_summary()
+
+
+if __name__ == "__main__":
+    main()

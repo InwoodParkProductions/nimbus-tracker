@@ -1,0 +1,43 @@
+========================================================
+  NIMBUS TRACKER 3  —  by Inwood Park Productions
+  Automatic camera tracking for Blender
+========================================================
+
+EVERYTHING IS INCLUDED. No installs, no downloads:
+Blender, the AI models, everything ships inside this package.
+
+HOW TO RUN
+----------
+1. EXTRACT THIS ZIP FIRST.
+   Right-click the .zip  ->  "Extract All..."  ->  pick a folder.
+   Do NOT run the app from inside the zip preview — extract the
+   WHOLE folder first.
+
+2. Open the extracted "Nimbus Tracker" folder and double-click:
+        Nimbus Tracker.exe
+
+3. First launch may show a blue Windows SmartScreen box
+   ("Windows protected your PC") because the app isn't code-signed.
+   Click  "More info"  ->  "Run anyway".
+
+That's it. If your PC doesn't have Microsoft's WebView2 runtime,
+the app opens in your web browser instead — either way it works.
+
+REQUIREMENTS
+------------
+* Windows 10 or 11 (64-bit).
+* An NVIDIA GPU makes the AI masking and rendering much faster,
+  but everything falls back to CPU automatically without one.
+
+WHAT IT DOES
+------------
+Open a video clip -> it splits it into camera shots -> AI masks the
+people out (costumes, props and all) -> tracks the background ->
+solves the camera -> drops the solved camera into your Blender
+scene -> renders while you watch, live in Blender's own window.
+When a shot's background is too plain for a full 3D solve, it falls
+back to a best-effort motion match so your CG still follows the
+camera.
+
+Your settings live in:  %APPDATA%\NimbusTracker
+Nothing is uploaded — all processing stays on your machine.
