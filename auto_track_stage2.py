@@ -322,6 +322,9 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
                   f"(only runs above {clean_above:g} px)")
 
     tripod_at = settings.get("tripod_fallback_error", 8.0)
+    # remembered so the perspective restore below can undo the manual-keyframe
+    # retry's state instead of solving with keyframes it never chose
+    kf_selection_was = ts.use_keyframe_selection
 
     # Manual-keyframe retry: automatic keyframe selection often reports
     # "no good keyframes" on short shots. Pick the best-covered frame in
@@ -354,8 +357,29 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
             stats["solve_mode"] = "tripod"
             err = terr
         elif err is not None:
+            # Tripod was worse, so go back to perspective. There is only ever
+            # ONE reconstruction in the file — each solve overwrites the last
+            # — so whatever this re-solve produces IS what we ship, and its
+            # error is the error. The old number described a reconstruction
+            # that no longer exists.
+            #
+            # This used to discard the result entirely, and `err` kept
+            # describing the vanished solve. Measured on shot 01: err said
+            # 22.60px while the file actually held a 137.42px reconstruction.
+            # It escaped only because 22.60 also failed the 20px ceiling — a
+            # 25px ceiling would have shipped 137px of garbage as a good solve.
+            #
+            # Note this re-solve is NOT the earlier one: the manual-keyframe
+            # retry above leaves use_keyframe_selection off, so restore that
+            # too, otherwise "restored" silently means "solved with different
+            # keyframes".
             ts.use_tripod_solver = False
-            try_solve("perspective (restored)")
+            ts.use_keyframe_selection = kf_selection_was
+            rerr = try_solve("perspective (restored)")
+            if rerr is None:
+                print("[stage2] restore failed — no valid reconstruction left")
+            err = rerr
+            stats["solve_mode"] = "perspective" if rerr is not None else None
 
     # Quality ceiling: a "solve" with tens of pixels of error is worse
     # than no solve — it would place CG confidently in the wrong place.
