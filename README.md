@@ -21,8 +21,8 @@ clip ─► split into shots ─► person masks ─► camera solve ─► QC o
 |------|------|-------|
 | 0  split | `split_shots.py` | scene-cut detection + 1080p tracking proxies |
 | 1  mask | `segment_people.py` | SAM2 silhouettes + YOLO11, temporal hysteresis |
-| 2  solve | `auto_track.py` + `auto_track_stage2.py` | classic KLT front-end, then a learned (CoTracker3) retry; three solve attempts per front-end each in its own Blender process; every solve validated for real 3D geometry, not just reprojection error |
-| 2a learned tracks | `cotrack_points.py` | background-seeded CoTracker3, streamed (flat VRAM) |
+| 2  solve | `auto_track.py` + `auto_track_stage2.py` | classic KLT front-end, then a learned retry; three solve attempts per front-end each in its own Blender process; every solve validated for real 3D geometry, not just reprojection error |
+| 2a learned tracks | `cotrack_points.py` | background-seeded point tracking, streamed (flat VRAM). Default backend **BootsTAPIR** (Apache-2.0, commercial-safe); `--tracker cotracker` for Meta CoTracker (non-commercial, slightly tighter on hard shots) |
 | 2c 2D fallback | `flow_solve.py` | rotation/zoom motion-match when 3D can't solve |
 | QC | `dump_solve.py` + `qc_render.py` | overlays solved points on the footage so you can *see* if the track holds |
 | 3  handoff | `apply_track_stage3.py` | bakes the solved camera into your `.blend` |
@@ -42,39 +42,44 @@ python auto_track.py "clip.mov" --shot 3 \
 or `python ui.py` for the windowed app. Build a standalone exe with
 `python -m PyInstaller "Nimbus Tracker.spec"` (see `DEVELOPER_README.txt`).
 
+**First-time setup:** after installing the Python deps, run
+`python setup_tracker.py` once to fetch the default tracker (BootsTAPIR,
+Apache-2.0 — its code + ~209 MB checkpoint aren't vendored in this repo).
+
 ---
 
 ## License
 
-Nimbus Tracker is released under the **GNU General Public License v3.0**
-(see `LICENSE`). This is required by its dependencies as much as chosen:
-Blender (bundled) and every script that imports `bpy` are GPL, and Ultralytics
-YOLO11 is AGPL-3.0.
+Nimbus Tracker as a whole is **AGPL-3.0** (see `LICENSE` and
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)). This is set by its
+dependencies as much as chosen: Ultralytics YOLO11 is AGPL-3.0, Blender and
+every `bpy` script are GPL. **The default tracker is now BootsTAPIR
+(Apache-2.0), so nothing in the default pipeline is non-commercial** — the
+program is legitimately shareable open-source.
 
-### Two AI models are downloaded at runtime, NOT shipped in this repo
+Crucially: AGPL/GPL govern *distributing the software*, **not the output you
+make with it.** Plates, renders and comps you produce are yours — commercial
+work included. You can use this to make paid VFX shots today.
 
-They have their own, more restrictive terms. The pipeline treats both as
-best-effort and falls back without them, but if you use them, their licenses
-govern:
+### The one non-commercial option (off by default)
 
-| Model | Downloaded by | License | Plain-English |
+| Model | Selected by | License | Plain-English |
 |-------|---------------|---------|---------------|
-| **CoTracker3** | `cotrack_points.py` | **non-commercial** (Meta research license — verify current terms) | fine for personal / research use; **not** for a commercial product |
-| **RobustVideoMatting** | `matte_people.py` | GPL-3.0 | fine here; review before bundling into anything you sell |
+| **CoTracker3** | `--tracker cotracker` | **CC-BY-NC (non-commercial)** | slightly tighter on the hardest shots; personal / non-monetized only, never in a distributed build |
 
-### If you want to SELL a closed-source product
+`RobustVideoMatting` (matting, GPL-3.0) is fine for output use; swap it for
+BiRefNet (MIT) if you want to tidy that corner for a bundled build.
 
-GPL software *can* be sold, but you must give buyers the source and they may
-redistribute it. To ship a **proprietary** paid build instead you would need
-to, at minimum:
+### If you want to SELL a closed-source (proprietary) product
+
+Using it to make commercial work is already fine. To ship a *proprietary paid
+build of the software itself* you'd still need to:
 
 1. Buy a commercial license from Ultralytics (to lift AGPL on YOLO11), **or**
    swap YOLO for a permissively-licensed detector.
-2. Replace CoTracker3 (non-commercial) with a permissive point tracker.
-3. Replace RobustVideoMatting (GPL) with a permissive matting model — e.g.
-   BiRefNet (MIT) — verify at swap time.
-4. Note that the `bpy` scripts and bundled Blender remain GPL regardless;
-   Blender is load-bearing here.
+2. Keep `--tracker bootstapir` (done) — never bundle CoTracker.
+3. Optionally replace RVM (GPL) with BiRefNet (MIT).
+4. `bpy` scripts and bundled Blender remain GPL; Blender is load-bearing.
 
 None of this is legal advice — for a commercial launch, get a lawyer to review
 the dependency stack.
