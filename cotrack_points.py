@@ -213,8 +213,12 @@ def track_bootstapir(vid_cpu, q, T, dev, offline):
         sys.exit(f"BootsTAPIR checkpoint missing: {ckpt}\n"
                  "  download (Apache-2.0): https://storage.googleapis.com/"
                  "dm-tapnet/causal_bootstapir_checkpoint.pt")
-    IN = 480
-    tapir = TapirInference(ckpt, (IN, IN), 4, dev)
+    # Tunables (env-overridable for the A/B sweep; the winner becomes default):
+    #   IN    model's square input resolution — higher keeps finer detail
+    #   ITERS PIPs refinement iterations per point — more = tighter positions
+    IN = int(os.environ.get("BOOTSTAPIR_RES", "480"))
+    ITERS = int(os.environ.get("BOOTSTAPIR_ITERS", "4"))
+    tapir = TapirInference(ckpt, (IN, IN), ITERS, dev)
 
     # vid_cpu [1,T,3,H,W] RGB 0-255 -> BGR uint8 frames (TapirInference does its
     # own BGR->RGB in preprocess_frame, so it expects BGR like a cv2 frame).
