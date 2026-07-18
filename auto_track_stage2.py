@@ -493,10 +493,24 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
                                  default=fs + fd - 1)
             stats["manual_keyframes"] = [obj.keyframe_a, obj.keyframe_b]
         err = try_solve(f"{attempt} attempt")
+        # Quality ceiling — the single-attempt path skipped it, so garbage
+        # high-error solves were being accepted and even ranked as "wins": a
+        # 295px perspective solve beat a 33px tripod on shot 1 because
+        # perspective outranks tripod and nothing had rejected the 295px. A
+        # solve worse than this places CG confidently in the wrong spot, which
+        # is worse than admitting no solve. (The in-process chain below applies
+        # the same ceiling; this mirrors it for the per-process attempts.)
+        max_err = settings.get("max_acceptable_error", 20.0)
+        if err is not None and err > max_err:
+            print(f"[stage2] {attempt} solve {err:.2f}px exceeds {max_err}px "
+                  "ceiling — reporting no usable solve")
+            stats["rejected_error"] = err
+            err = None
         stats["solve_mode"] = (None if err is None else
                                ("tripod" if attempt == "tripod"
                                 else "perspective"))
         stats["accepted_error"] = err
+        stats["average_solve_error"] = err
         return clip
 
     err = try_solve("perspective")
