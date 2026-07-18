@@ -103,7 +103,12 @@ def parse_args():
     p.add_argument("--rotation", default="0,0,0", help="Extra path rotation in degrees")
     p.add_argument("--scale", default="1.0", help="Scale of the camera motion")
     p.add_argument("--render", help="Render output (.mp4 = video, no extension = PNG sequence)")
-    p.add_argument("--engine", default="eevee", help="cycles | eevee | workbench")
+    p.add_argument("--engine", default=None,
+                   help="cycles | eevee | workbench. Default: whatever the "
+                        ".blend is set to — forcing an engine breaks lighting "
+                        "(a Cycles-lit scene rendered in Eevee comes out ~2x "
+                        "dark). Eevee is still the automatic fallback if the "
+                        "scene's engine can't run.")
     p.add_argument("--samples", help="Render samples")
     p.add_argument("--percent", help="Resolution percentage")
     p.add_argument("--frames", help="Render frame range A-B")
@@ -280,12 +285,24 @@ def do_render(args, scene_out):
         print("[warn] --render needs a scene; skipping render")
         return False
     render_path = os.path.abspath(args.render)
-    engines = [args.engine]
-    if args.engine.lower() == "cycles":
-        engines.append("eevee")
+    # Engine list. `None` means "use whatever the .blend is set to" — which is
+    # the RIGHT default, because forcing an engine silently breaks lighting:
+    # these scenes are lit for Cycles with an HDR world, and rendering them in
+    # Eevee (no baked light probes = no GI) came out HALF as bright (measured
+    # 43 vs 86 mean on shot 19). The old default of "eevee" turned every
+    # Cycles scene dark. Eevee stays only as the automatic fallback if the
+    # scene's own engine can't run at all.
+    if args.engine:
+        engines = [args.engine]
+        if args.engine.lower() == "cycles":
+            engines.append("eevee")
+    else:
+        engines = [None, "eevee"]      # None = the .blend's own engine
     for eng in engines:
         # --factory-startup: don't load the user's addons into the render
-        # (asset-library addons poll servers and slow it down).
+        # (asset-library addons poll servers and slow it down). It keeps the
+        # SCENE's color management (view transform, etc.) — those live in the
+        # .blend, not preferences — so AgX/Filmic still apply.
         cmd = [args.blender, "--factory-startup"]
         if not args.live:
             # -b (headless) is the right default for a queue: no window, no
@@ -294,16 +311,19 @@ def do_render(args, scene_out):
             # 8GB). --live puts the watch-it-happen window back.
             cmd.insert(1, "-b")
         cmd += [scene_out, "-P", os.path.join(HERE, "render_stage4.py"), "--",
-                "--out", render_path, "--engine", eng]
+                "--out", render_path]
+        if eng:
+            cmd += ["--engine", eng]
         for flag in ("samples", "percent", "frames"):
             if getattr(args, flag):
                 cmd += ["--" + flag, getattr(args, flag)]
         if args.transparent:
             cmd.append("--transparent")
-        if run_ok(cmd, f"Stage 4: rendering ({eng})") and \
+        label = eng or "scene's engine"
+        if run_ok(cmd, f"Stage 4: rendering ({label})") and \
                 render_landed(render_path):
             return True
-        print(f"[warn] render with {eng} failed"
+        print(f"[warn] render with {label} failed"
               + (" — trying Eevee" if eng != engines[-1] else ""))
     print("[warn] rendering did not complete")
     return False

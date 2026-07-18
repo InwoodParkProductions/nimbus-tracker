@@ -513,7 +513,12 @@ def _process_queue_entry(entry):
     if entry.get("blend") and not entry.get("kind"):
         cmd = [BLENDER, "--factory-startup", entry["blend"], "-P",
                os.path.join(HERE, "render_stage4.py"), "--",
-               "--out", entry["render"], "--engine", entry.get("engine", "eevee")]
+               "--out", entry["render"]]
+        # Only pass --engine if the entry actually specifies one; otherwise
+        # let the .blend's own engine stand. Forcing eevee on a Cycles-lit
+        # scene renders it ~2x dark (no baked GI). See do_render in auto_track.
+        if entry.get("engine"):
+            cmd += ["--engine", entry["engine"]]
         if entry.get("samples"):
             cmd += ["--samples", str(entry["samples"])]
         if entry.get("percent") and str(entry["percent"]) != "100":
@@ -535,7 +540,9 @@ def _process_queue_entry(entry):
         f"--start={entry.get('start', '0,0,0')}",
         f"--rotation={entry.get('rotation', '0,0,0')}",
         f"--scale={entry.get('scale', '1.0')}",
-        "--render", entry["render"], "--engine", entry.get("engine", "eevee")]
+        "--render", entry["render"]]
+    if entry.get("engine"):   # else auto_track honors the .blend's own engine
+        cmd += ["--engine", entry["engine"]]
     if entry.get("lens"):
         cmd += [f"--lens-mm={entry['lens']}"]
     if entry.get("focus"):
