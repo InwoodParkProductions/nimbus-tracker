@@ -81,6 +81,13 @@ def parse_args():
                    help="use the offline model (slightly better, but holds "
                         "the WHOLE clip in VRAM — 335 frames already OOMs an "
                         "8GB card, so this is short shots only)")
+    p.add_argument("--tracker", default="cotracker",
+                   choices=sorted(TRACKERS),
+                   help="tracking backend (default cotracker). cotracker is "
+                        "CC-BY-NC (non-commercial); the others are Apache-2.0 "
+                        "and get wired in for a commercial-clean pipeline. "
+                        "Reverting to cotracker is just this flag — no code "
+                        "rollback.")
     p.add_argument("--device", default="cuda")
     return p.parse_args()
 
@@ -134,6 +141,76 @@ def pick_seed_frames(masks_dir, n_frames, w, h, n_seeds):
     return sorted(set(seeds))
 
 
+# ---- pluggable tracker backends -----------------------------------------
+# The tracker is a swappable backend, selected by --tracker. This exists so
+# CoTracker can be replaced with a permissively-licensed tracker (BootsTAPIR /
+# TAPNext / LocoTrack, all Apache-2.0) WITHOUT losing the CoTracker path:
+# reverting is just `--tracker cotracker` (the default), never a code
+# rollback. Each backend takes (vid_cpu[1,T,3,H,W] float on CPU, queries
+# [1,N,3] (t,x,y) on dev, T, dev, offline) and returns (tr[T,N,2] px np,
+# vv[T,N] bool np, T). A new tracker is one more function registered in
+# TRACKERS; the CoTracker code below is never touched by adding one.
+#
+# LICENSE: cotracker is CC-BY-NC (non-commercial). It stays the default for
+# quality, but for commercial use pick a permissive backend once integrated,
+# or run the pipeline with --no-cotracker (classic KLT front-end).
+
+def track_cotracker(vid_cpu, q, T, dev, offline):
+    """CoTracker3 (Meta). NON-COMMERCIAL license — see the note above."""
+    import torch
+    if offline:
+        model = torch.hub.load("facebookresearch/co-tracker",
+                               "cotracker3_offline", trust_repo=True).to(dev)
+        with torch.no_grad():
+            tracks, vis = model(vid_cpu.to(dev), queries=q)
+    else:
+        # Online model: fixed-size sliding window, so VRAM is flat in shot
+        # length. The offline model holds the entire clip at once and OOMs an
+        # 8GB card at 335 frames — measured, on shots 01/06/10 of this project
+        # (which is to say: on most real shots).
+        model = torch.hub.load("facebookresearch/co-tracker",
+                               "cotracker3_online", trust_repo=True).to(dev)
+        step = model.step
+        with torch.no_grad():
+            model(video_chunk=vid_cpu[:, :step * 2].to(dev),
+                  is_first_step=True, queries=q)
+            tracks = vis = None
+            for i in range(0, max(1, T - step), step):
+                chunk = vid_cpu[:, i:i + step * 2].to(dev)
+                if chunk.shape[1] < 2:
+                    break
+                out = model(video_chunk=chunk)
+                if out[0] is not None:
+                    tracks, vis = out
+            if tracks is None:
+                sys.exit("online tracker returned nothing")
+    tr = tracks[0].cpu().numpy()          # (T, N, 2) in processing px
+    vv = (vis[0].cpu().numpy() > 0.5)     # (T, N)
+    # The online model reports on the frames it has consumed, which can lag
+    # the clip by less than one window; clamp so indexing stays safe.
+    del tracks, vis
+    return tr, vv, min(T, tr.shape[0])
+
+
+# Permissive backends get registered here as they are integrated + A/B'd
+# against cotracker. Until then they raise a clear message rather than
+# silently doing nothing.
+def _not_integrated(name):
+    def _stub(*_a, **_k):
+        sys.exit(f"--tracker {name} is not integrated yet; the interface is "
+                 "ready but the backend + weights aren't wired in. Use "
+                 "--tracker cotracker (default) for now.")
+    return _stub
+
+
+TRACKERS = {
+    "cotracker": track_cotracker,       # default; non-commercial
+    "tapnext": _not_integrated("tapnext"),      # Apache-2.0 (planned)
+    "bootstapir": _not_integrated("bootstapir"),  # Apache-2.0 (planned)
+    "locotrack": _not_integrated("locotrack"),    # Apache-2.0 (planned)
+}
+
+
 def main():
     a = parse_args()
     import torch
@@ -184,42 +261,12 @@ def main():
     # own, before the model allocates anything.
     vid_cpu = torch.tensor(np.stack(frames)).permute(0, 3, 1, 2)[None].float()
 
-    if a.offline:
-        model = torch.hub.load("facebookresearch/co-tracker",
-                               "cotracker3_offline", trust_repo=True).to(dev)
-        with torch.no_grad():
-            tracks, vis = model(vid_cpu.to(dev), queries=q)
-    else:
-        # Online model: fixed-size sliding window, so VRAM is flat in shot
-        # length. The offline model holds the entire clip at once and OOMs an
-        # 8GB card at 335 frames — measured, on shots 01/06/10 of this project
-        # (which is to say: on most real shots).
-        model = torch.hub.load("facebookresearch/co-tracker",
-                               "cotracker3_online", trust_repo=True).to(dev)
-        step = model.step
-        with torch.no_grad():
-            model(video_chunk=vid_cpu[:, :step * 2].to(dev),
-                  is_first_step=True, queries=q)
-            tracks = vis = None
-            for i in range(0, max(1, T - step), step):
-                chunk = vid_cpu[:, i:i + step * 2].to(dev)
-                if chunk.shape[1] < 2:
-                    break
-                out = model(video_chunk=chunk)
-                if out[0] is not None:
-                    tracks, vis = out
-            if tracks is None:
-                sys.exit("online tracker returned nothing")
-    tr = tracks[0].cpu().numpy()          # (T, N, 2) in processing px
-    vv = (vis[0].cpu().numpy() > 0.5)     # (T, N)
-    # The online model reports on the frames it has consumed, which can lag
-    # the clip by less than one window; clamp so indexing below is safe.
-    T = min(T, tr.shape[0])
-    del vid_cpu, tracks, vis
+    tr, vv, T = TRACKERS[a.tracker](vid_cpu, q, T, dev, a.offline)
+    del vid_cpu
     if dev == "cuda":
         torch.cuda.empty_cache()
     print(f"[cotrack] tracked {tr.shape[0]} frames, {tr.shape[1]} points "
-          f"({'offline' if a.offline else 'online/streaming'})")
+          f"(backend: {a.tracker})")
 
     # Drop points that wander onto a person: the whole point is a background
     # solve, and a marker riding a moving actor is worse than no marker.
