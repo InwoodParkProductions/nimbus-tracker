@@ -103,7 +103,7 @@ def remember_last(scene, form):
     s = load_settings()
     if scene:
         s["last_scene"] = scene
-    s["last_engine"] = form.get("engine", "eevee")
+    s["last_engine"] = form.get("engine", "cycles")
     s["last_samples"] = form.get("samples", "64")
     s["last_percent"] = form.get("percent", "100")
     try:
@@ -2859,7 +2859,7 @@ def queue_add_tracked():
         "name": f"{shotname} · shot {shot} · take {n}",
         "footage": footage, "shot": shot, "blend": blend_copy,  # render-only
         "render": default_render_path(footage, shot, f"_take{n:02d}"),
-        "engine": meta.get("engine", "eevee"),
+        "engine": meta.get("engine", "").strip(),
         "samples": meta.get("samples", "64"),
         "percent": meta.get("percent", "100"),
         "transparent": bool(meta.get("transparent")),
@@ -2985,7 +2985,9 @@ def render_final():
     _remember_placement(scene_out, footage, shot)
     cmd = [BLENDER, "--factory-startup", scene_out,
            "-P", os.path.join(HERE, "render_stage4.py"), "--",
-           "--out", render, "--engine", meta.get("engine", "eevee")]
+           "--out", render]
+    if meta.get("engine"):   # else render_stage4 uses the .blend engine
+        cmd += ["--engine", meta["engine"]]
     if meta.get("samples"):
         cmd += ["--samples", str(meta["samples"])]
     if meta.get("percent") and str(meta["percent"]) != "100":
