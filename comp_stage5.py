@@ -133,14 +133,18 @@ def build_distort_map(solve_json, cw, ch):
         if ru_cur > rd_max * 4.0:       # sampling absurdly far outside CG
             rd_fold = rd_tab[-1]
             break
+    # np.interp CLAMPS beyond the table's range: radii past the fold get the
+    # fold's ru, not identity. That matters — an identity fallback beyond the
+    # fold leaves a hard curved SEAM in the comp where warped meets unwarped
+    # (visible as a tear on a detailed background). Clamping instead stretches
+    # the CG continuously at the extreme edge: no seam, just mild smear in the
+    # last ~1% of frame that an overfit solve can't model anyway.
     ru = np.interp(rd, rd_tab, ru_tab)
-    bad = np.zeros_like(rd, dtype=bool)
     if rd_fold is not None:
-        bad = rd > rd_fold
+        beyond = float((rd > rd_fold).mean())
         print(f"[comp] distortion model folds at r={rd_fold:.3f} "
-              f"(frame corner r={rd_max:.3f}) — {100.0 * bad.mean():.1f}% "
-              "of pixels beyond it are left unwarped (overfit solve)")
-    ru = np.where(bad, rd, ru)
+              f"(frame corner r={rd_max:.3f}) — {100.0 * beyond:.1f}% of "
+              "pixels beyond it are edge-clamped (overfit solve)")
     scale = np.where(rd > 1e-12, ru / np.where(rd > 1e-12, rd, 1.0), 1.0)
     xu, yu = xd * scale, yd * scale
 
@@ -148,11 +152,26 @@ def build_distort_map(solve_json, cw, ch):
     mapx = (cw / 2.0 + f_px * xu).astype(np.float32)
     mapy = (ch / 2.0 - f_px * yu).astype(np.float32)
     shift = float(np.max(np.hypot(mapx - U, mapy - V)))
-    # residual of the inversion (roundtrip) on the invertible pixels
-    if (~bad).any():
-        resid = float(np.max(np.abs(fwd(ru) - rd)[~bad])) * f_px
-    else:
-        resid = 0.0
+
+    # Refuse a non-physical warp. The distortion refine is unstable run to run
+    # (div_k1 seen from 0.17 to 1.25 on the SAME shot) and an overfit solve
+    # produces a warp that bends the CG grotesquely: k1=1.25 gave a 4226px
+    # shift — over 100% of frame width, which no real lens does (a fisheye is
+    # ~15-20% at the corner, a normal lens <2%). Applying it destroys the
+    # frame, and an unwarped comp — a few px of edge misalignment — is far
+    # better than that. So above a physical ceiling, skip the warp entirely.
+    max_frac = 0.12    # 12% of frame width; generously past any real lens
+    if shift > max_frac * cw:
+        print(f"[comp] distortion warp is {shift:.0f}px "
+              f"({100.0 * shift / cw:.0f}% of frame width) — non-physical, "
+              "the solve overfit its lens. Skipping the warp (CG left as "
+              "rendered; expect a few px of edge misalignment instead).")
+        return None
+    # residual of the inversion (roundtrip) on the invertible pixels — inside
+    # the fold radius, where fwd(ru) should reproduce rd
+    inside = rd <= rd_fold if rd_fold is not None else np.ones_like(rd, bool)
+    resid = (float(np.max(np.abs(fwd(ru) - rd)[inside])) * f_px
+             if inside.any() else 0.0)
     print(f"[comp] CG distortion-matched to the solve "
           f"({model} {[round(k, 4) for k in ks]}) — max shift {shift:.1f}px, "
           f"inversion residual {resid:.3f}px")
