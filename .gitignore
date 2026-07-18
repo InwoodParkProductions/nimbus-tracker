@@ -18,3 +18,6 @@ __pycache__/
 # GitHub's 100 MB per-file limit, and the weights never change. Restore them
 # from "Nimbus Tracker Source Kit.zip" if this tree is ever cloned fresh.
 *.pt
+
+# Third-party trackers (Apache-2.0) — cloned by setup, not vendored
+third_party/

@@ -192,22 +192,87 @@ def track_cotracker(vid_cpu, q, T, dev, offline):
     return tr, vv, min(T, tr.shape[0])
 
 
-# Permissive backends get registered here as they are integrated + A/B'd
-# against cotracker. Until then they raise a clear message rather than
-# silently doing nothing.
+def track_bootstapir(vid_cpu, q, T, dev, offline):
+    """BootsTAPIR causal (Google DeepMind) — Apache-2.0, COMMERCIAL-SAFE.
+
+    Online/causal, so VRAM is flat in shot length like CoTracker's streaming
+    model. The online model tracks one direction per pass, so we run forward
+    AND backward from the seed frame — a mid-clip seed still covers the whole
+    shot. Uses the minimal PyTorch impl in third_party/tapir (its own
+    Apache-2.0 tapnet module + the dm-tapnet causal checkpoint).
+    """
+    import os
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    tp = os.path.join(HERE, "third_party", "tapir")
+    if tp not in sys.path:
+        sys.path.insert(0, tp)
+    from tapnet.tapir_inference import TapirInference
+
+    ckpt = os.path.join(tp, "models", "causal_bootstapir_checkpoint.pt")
+    if not os.path.exists(ckpt):
+        sys.exit(f"BootsTAPIR checkpoint missing: {ckpt}\n"
+                 "  download (Apache-2.0): https://storage.googleapis.com/"
+                 "dm-tapnet/causal_bootstapir_checkpoint.pt")
+    IN = 480
+    tapir = TapirInference(ckpt, (IN, IN), 4, dev)
+
+    # vid_cpu [1,T,3,H,W] RGB 0-255 -> BGR uint8 frames (TapirInference does its
+    # own BGR->RGB in preprocess_frame, so it expects BGR like a cv2 frame).
+    rgb = vid_cpu[0].permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
+    T2, H, W = rgb.shape[:3]
+
+    # LETTERBOX to square before the model sees it. TapirInference resizes every
+    # frame to a square input_resolution (480x480), which SQUISHES non-square
+    # footage — 2.39:1 plates compress 2.4x horizontally and tracking falls
+    # apart (measured: perspective->tripod on shot 19 vs CoTracker). Padding to
+    # square first keeps the aspect; we shift query points into the padded frame
+    # and shift tracks back out.
+    sq = max(H, W)
+    pad_y, pad_x = (sq - H) // 2, (sq - W) // 2
+    bgr = np.zeros((T2, sq, sq, 3), np.uint8)
+    bgr[:, pad_y:pad_y + H, pad_x:pad_x + W] = rgb[..., ::-1]
+
+    qn = q[0].cpu().numpy()                    # (N,3) = (t, x, y) in W,H px
+    N = qn.shape[0]
+    seed_t = max(0, min(T2 - 1, int(round(float(qn[:, 0].min())))))
+    # into padded-square px, then to 480, in (y, x) order (model convention)
+    qy = (qn[:, 2] + pad_y) / sq * IN
+    qx = (qn[:, 1] + pad_x) / sq * IN
+    qpts = np.stack([qy, qx], axis=1).astype(np.float32)
+
+    tr = np.zeros((T2, N, 2), np.float32)      # (x, y) in W,H px
+    vv = np.zeros((T2, N), bool)
+
+    def sweep(order):
+        tapir.set_points(bgr[seed_t], qpts.copy())   # (re)seed + reset state
+        for f in order:
+            pts, vis = tapir(bgr[f])                  # (N,2) x,y in padded px
+            pts[:, 0] -= pad_x                        # padded-square -> W,H px
+            pts[:, 1] -= pad_y
+            tr[f] = pts
+            vv[f] = vis
+
+    sweep(range(seed_t, T2))                    # forward
+    if seed_t > 0:
+        sweep(range(seed_t, -1, -1))            # backward covers 0..seed_t
+    return tr, vv, T2
+
+
+# Permissive backends register here as they're integrated + A/B'd against
+# cotracker. Unintegrated ones refuse with a clear message.
 def _not_integrated(name):
     def _stub(*_a, **_k):
         sys.exit(f"--tracker {name} is not integrated yet; the interface is "
                  "ready but the backend + weights aren't wired in. Use "
-                 "--tracker cotracker (default) for now.")
+                 "--tracker cotracker (default) or bootstapir for now.")
     return _stub
 
 
 TRACKERS = {
-    "cotracker": track_cotracker,       # default; non-commercial
+    "cotracker": track_cotracker,        # non-commercial (CC-BY-NC)
+    "bootstapir": track_bootstapir,      # Apache-2.0, commercial-safe
     "tapnext": _not_integrated("tapnext"),      # Apache-2.0 (planned)
-    "bootstapir": _not_integrated("bootstapir"),  # Apache-2.0 (planned)
-    "locotrack": _not_integrated("locotrack"),    # Apache-2.0 (planned)
+    "locotrack": _not_integrated("locotrack"),  # Apache-2.0 (planned)
 }
 
 
