@@ -151,12 +151,11 @@ def parse_args():
                    help="Skip stage 5 (compositing CG behind the actors "
                         "after the render). On by default because the "
                         "composited shot IS the deliverable.")
-    p.add_argument("--tracker", default="cotracker",
-                   help="learned-tracking backend (default cotracker). "
-                        "cotracker is non-commercial; permissive Apache-2.0 "
-                        "backends (tapnext/bootstapir/locotrack) get wired in "
-                        "for commercial use. Reverting is just --tracker "
-                        "cotracker — no code change.")
+    p.add_argument("--tracker", default="bootstapir",
+                   help="learned-tracking backend (default bootstapir, "
+                        "Apache-2.0 / commercial-safe). Use --tracker cotracker "
+                        "(CC-BY-NC, non-commercial) for the tightest solves on "
+                        "personal work.")
     p.add_argument("--no-cotracker", action="store_true",
                    help="Skip the learned tracking front-end and use the "
                         "classic detect+KLT one. The learned front-end is "

@@ -1,7 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('template.blend', '.'), ('aero_bg.svg', '.'), ('nimbus_bg.jpg', '.'), ('nagai_bg.svg', '.'), ('nimbus.ico', '.'), ('yolo11n-seg.pt', '.'), ('yolo11x-seg.pt', '.'), ('sam2.1_s.pt', '.'), ('auto_track_stage1.py', '.'), ('auto_track_stage2.py', '.'), ('apply_track_stage3.py', '.'), ('render_stage4.py', '.'), ('preview_track.py', '.'), ('export_setup.py', '.'), ('blender_setup.py', '.'), ('place_static.py', '.'), ('dump_solve.py', '.'), ('export_camera.py', '.'), ('static', 'static')]
+datas = [('template.blend', '.'), ('aero_bg.svg', '.'), ('nimbus_bg.jpg', '.'), ('nagai_bg.svg', '.'), ('nimbus.ico', '.'), ('yolo11n-seg.pt', '.'), ('yolo11x-seg.pt', '.'), ('sam2.1_s.pt', '.'), ('auto_track_stage1.py', '.'), ('auto_track_stage2.py', '.'), ('apply_track_stage3.py', '.'), ('render_stage4.py', '.'), ('preview_track.py', '.'), ('export_setup.py', '.'), ('blender_setup.py', '.'), ('place_static.py', '.'), ('dump_solve.py', '.'), ('export_camera.py', '.'), ('static', 'static'),
+    # BootsTAPIR tracker (Apache-2.0): the tapnet module + causal checkpoint.
+    # Shipped as data so the frozen app is self-contained; the backend resolves
+    # it under sys._MEIPASS/third_party/tapir. Not vendored in git (gitignored);
+    # setup_tracker.py fetches it for source users before a build.
+    ('third_party/tapir/tapnet', 'third_party/tapir/tapnet'),
+    ('third_party/tapir/models/causal_bootstapir_checkpoint.pt', 'third_party/tapir/models'),
+    ('third_party/tapir/LICENSE', 'third_party/tapir')]
 binaries = []
 # Pipeline modules are launched as subprocesses via `exe --run <module>`, which
 # runpy-imports them by name — PyInstaller cannot see that statically, so every

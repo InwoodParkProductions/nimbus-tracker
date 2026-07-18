@@ -81,13 +81,12 @@ def parse_args():
                    help="use the offline model (slightly better, but holds "
                         "the WHOLE clip in VRAM — 335 frames already OOMs an "
                         "8GB card, so this is short shots only)")
-    p.add_argument("--tracker", default="cotracker",
+    p.add_argument("--tracker", default="bootstapir",
                    choices=sorted(TRACKERS),
-                   help="tracking backend (default cotracker). cotracker is "
-                        "CC-BY-NC (non-commercial); the others are Apache-2.0 "
-                        "and get wired in for a commercial-clean pipeline. "
-                        "Reverting to cotracker is just this flag — no code "
-                        "rollback.")
+                   help="tracking backend (default bootstapir, "
+                        "Apache-2.0 / commercial-safe). cotracker (CC-BY-NC, "
+                        "non-commercial) is tighter on some hard shots; select "
+                        "it with --tracker cotracker for personal work.")
     p.add_argument("--device", default="cuda")
     return p.parse_args()
 
@@ -202,8 +201,10 @@ def track_bootstapir(vid_cpu, q, T, dev, offline):
     Apache-2.0 tapnet module + the dm-tapnet causal checkpoint).
     """
     import os
-    HERE = os.path.dirname(os.path.abspath(__file__))
-    tp = os.path.join(HERE, "third_party", "tapir")
+    # third_party/tapir ships as data next to the code in both source and the
+    # frozen app (PyInstaller onedir puts datas under sys._MEIPASS).
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    tp = os.path.join(base, "third_party", "tapir")
     if tp not in sys.path:
         sys.path.insert(0, tp)
     from tapnet.tapir_inference import TapirInference
