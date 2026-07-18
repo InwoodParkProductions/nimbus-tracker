@@ -1,22 +1,26 @@
-"""Stage 5: composite — CG background behind the actors, the actual deliverable.
+"""Stage 5: export comp ELEMENTS for assembly in Resolve (not a baked comp).
 
 Run with the SYSTEM python:
     python comp_stage5.py <footage> <cg_dir> <masks_dir> <out_dir>
-        [--frames A-B] [--grow 2] [--feather 5] [--preview]
+        [--frames A-B] [--grow 2] [--feather 5] [--solve-json solve.json]
 
-Everything upstream produces ingredients: stage 1 makes person mattes, stage 4
-renders the CG plates. This puts them together:
+A pre-flattened composite gives the colorist zero control — you can't grade the
+CG and the actor separately, or refine the key, once they're baked into one
+image. So instead of ONE comp, this exports the two elements that stack in
+Resolve:
 
-    comp = plate * alpha + CG * (1 - alpha)
+    <out>/bg/bg_####.png    CG background, warped to the plate's lens
+                            distortion (goes on the lower track, V1)
+    <out>/fg/fg_####.png    the actor as RGBA — plate RGB with the person matte
+                            in the alpha channel (goes on top, V2)
+    <out>/matte/####.png    the alpha on its own, for refining the key/grade
 
-where alpha is the (softened) person matte. The person stays from the original
-plate; the CG replaces everything else. Output is a PNG sequence at the CG's
-resolution plus an optional small preview .mp4 for review.
+In Resolve: drop fg on V2 over bg on V1 — it composites automatically because
+fg carries alpha — then grade each track to taste. A flattened preview
+(comp_sheet.png + preview.mp4) is written too, for QC only.
 
-Masks come in binary from SAM2, which is right for track exclusion and crunchy
-for compositing — so the matte is grown slightly (protect hair/blur that the
-segmenter missed) and edge-feathered. Both are tunable; for hair-critical work
-a dedicated matting model can replace this (see --alpha-dir).
+The matte is RVM's soft alpha (see matte_people.py, --alpha-dir); it falls
+back to grown+feathered SAM2 masks when no RVM alpha is supplied.
 """
 
 import argparse
@@ -237,16 +241,19 @@ def main():
     dmap = None
     if args.solve_json and os.path.exists(args.solve_json):
         dmap = build_distort_map(args.solve_json, cw, ch)
-    writer = None
-    if args.preview:
-        pw = 1280
-        ph2 = round(ch * pw / cw)
-        ph2 -= ph2 % 2
-        writer = cv2.VideoWriter(os.path.join(args.out_dir, "preview.mp4"),
-                                 cv2.VideoWriter_fourcc(*"mp4v"), 24.0,
-                                 (pw, ph2))
+    pw = 1280
+    ph2 = round(ch * pw / cw); ph2 -= ph2 % 2
+    writer = cv2.VideoWriter(os.path.join(args.out_dir, "preview.mp4"),
+                             cv2.VideoWriter_fourcc(*"mp4v"), 24.0, (pw, ph2))
+
+    bg_dir = os.path.join(args.out_dir, "bg")
+    fg_dir = os.path.join(args.out_dir, "fg")
+    matte_dir = os.path.join(args.out_dir, "matte")
+    for dd in (bg_dir, fg_dir, matte_dir):
+        os.makedirs(dd, exist_ok=True)
 
     n_done = 0
+    sheet_rows = []
     for src_f in range(a, b + 1):
         rel = src_f - a + 1
         ok, plate = cap.read()
@@ -260,57 +267,62 @@ def main():
             continue
         if dmap is not None:
             # warp the pinhole CG into the plate's distorted space. Corners
-            # can sample slightly beyond the rendered frame (the plate's
-            # barrel pulls edges inward); replicate is the least-bad fill —
-            # a proper fix is rendering CG with overscan, noted for later.
+            # can sample slightly beyond the rendered frame; replicate fill,
+            # and np.interp clamps the map at the fold so there's no seam.
             cgf = cv2.remap(cgf, dmap[0], dmap[1], cv2.INTER_LINEAR,
                             borderMode=cv2.BORDER_REPLICATE)
         plate_r = cv2.resize(plate, (cw, ch), interpolation=cv2.INTER_AREA)
-        alpha = load_alpha(args, rel, (cw, ch))[..., None]
-        comp = plate_r.astype(np.float32) * alpha \
-            + cgf.astype(np.float32) * (1.0 - alpha)
-        out = np.clip(comp, 0, 255).astype(np.uint8)
-        cv2.imwrite(os.path.join(args.out_dir, f"comp_{rel:04d}.png"), out)
+        alpha = load_alpha(args, rel, (cw, ch))          # 1 = person
+        a8 = np.clip(alpha * 255, 0, 255).astype(np.uint8)
+
+        # BG element: the CG, lens-matched. Straight RGB.
+        cv2.imwrite(os.path.join(bg_dir, f"bg_{rel:04d}.png"), cgf)
+        # FG element: plate RGB + person alpha, as RGBA. Premultiply is what
+        # Resolve/most compositors expect for a clean edge (no dark or bright
+        # fringe where alpha is partial); the straight matte rides in A so the
+        # colorist can still pull/refine the key.
+        af = alpha[..., None]
+        fg_rgb = np.clip(plate_r.astype(np.float32) * af, 0, 255).astype(np.uint8)
+        fg = cv2.merge([fg_rgb[:, :, 0], fg_rgb[:, :, 1], fg_rgb[:, :, 2], a8])
+        cv2.imwrite(os.path.join(fg_dir, f"fg_{rel:04d}.png"), fg)
+        # matte on its own — grade/refine handle
+        cv2.imwrite(os.path.join(matte_dir, f"matte_{rel:04d}.png"), a8)
+
+        # QC-only flattened preview (over/under composite of the two elements)
+        comp = np.clip(plate_r.astype(np.float32) * af
+                       + cgf.astype(np.float32) * (1 - af), 0, 255).astype(np.uint8)
         if writer is not None:
-            writer.write(cv2.resize(out, (pw, ph2)))
+            writer.write(cv2.resize(comp, (pw, ph2)))
+        if rel in (1, None) or len(sheet_rows) < 3:
+            tw = 420
+            th = round(ch * tw / cw); th -= th % 2
+            def lbl(im, t, c):
+                im = cv2.resize(im, (tw, th))
+                cv2.putText(im, t, (6, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2)
+                return im
+            bg_t = lbl(cgf, f"BG (CG) f{rel}", (0, 200, 255))
+            # show FG on checkerboard so its alpha is visible
+            chk = np.zeros((ch, cw, 3), np.uint8)
+            s = max(16, cw // 40)
+            chk[:] = 90
+            chk[(np.add.outer(np.arange(ch) // s, np.arange(cw) // s) % 2) == 0] = 150
+            fg_over = np.clip(chk.astype(np.float32) * (1 - af)
+                              + plate_r.astype(np.float32) * af, 0, 255).astype(np.uint8)
+            fg_t = lbl(fg_over, "FG (actor+alpha)", (0, 255, 0))
+            comp_t = lbl(comp, "stacked (preview)", (255, 255, 255))
+            sheet_rows.append(np.hstack([bg_t, fg_t, comp_t]))
         n_done += 1
     cap.release()
     if writer is not None:
         writer.release()
         print(f"[comp] preview: {os.path.join(args.out_dir, 'preview.mp4')}")
-    # Always-viewable still: plate over comp for the first/mid/last composited
-    # frame. The preview.mp4 uses mp4v, which the browser-based UI (WebView2)
-    # won't decode; a PNG contact sheet opens anywhere and is enough to judge
-    # the composite at a glance.
-    comps = sorted(glob.glob(os.path.join(args.out_dir, "comp_*.png")))
-    if comps:
-        picks = [comps[0], comps[len(comps) // 2], comps[-1]]
-        rows = []
-        for cp in picks:
-            rel = int(re.search(r"_(\d{4})\.png$", cp).group(1))
-            src_f = a + rel - 1
-            cc = cv2.imread(cp)
-            cap2 = cv2.VideoCapture(args.footage)
-            cap2.set(cv2.CAP_PROP_POS_FRAMES, src_f - 1)
-            okp, pl = cap2.read()
-            cap2.release()
-            tw = 620
-            th = round(cc.shape[0] * tw / cc.shape[1]); th -= th % 2
-            comp_t = cv2.resize(cc, (tw, th))
-            cv2.putText(comp_t, f"COMP f{rel}", (8, 26),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            if okp:
-                plate_t = cv2.resize(pl, (tw, th))
-                cv2.putText(plate_t, "plate", (8, 26),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            else:
-                plate_t = np.zeros((th, tw, 3), np.uint8)
-            rows.append(np.hstack([plate_t, comp_t]))
+    if sheet_rows:
         cv2.imwrite(os.path.join(args.out_dir, "comp_sheet.png"),
-                    np.vstack(rows))
+                    np.vstack(sheet_rows[:3]))
         print(f"[comp] contact sheet: "
               f"{os.path.join(args.out_dir, 'comp_sheet.png')}")
-    print(f"[comp] {n_done} frames -> {args.out_dir}")
+    print(f"[comp] {n_done} frames -> bg/ fg/ matte/ in {args.out_dir}")
+    print("[comp] Resolve: put fg/ on V2 over bg/ on V1 (fg carries alpha)")
     if n_done == 0:
         sys.exit("no frames composited")
 

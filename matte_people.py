@@ -30,6 +30,11 @@ def parse_args():
     p.add_argument("out_dir")
     p.add_argument("--frames", help="source frame range A-B (1-based "
                                     "inclusive); default = whole file")
+    p.add_argument("--model", default="resnet50",
+                   choices=["resnet50", "mobilenetv3"],
+                   help="RVM backbone (default resnet50 — noticeably "
+                        "cleaner edges on hair/fabric than mobilenetv3, "
+                        "at ~100MB vs ~15MB and a bit slower)")
     p.add_argument("--downsample", type=float, default=0.25,
                    help="model's internal downsample ratio (default 0.25 — "
                         "the author-recommended value for 4K input)")
@@ -42,7 +47,7 @@ def main():
     import torch
 
     dev = a.device if (a.device != "cuda" or torch.cuda.device_count()) else "cpu"
-    model = torch.hub.load("PeterL1n/RobustVideoMatting", "mobilenetv3",
+    model = torch.hub.load("PeterL1n/RobustVideoMatting", a.model,
                            trust_repo=True).to(dev).eval()
 
     cap = cv2.VideoCapture(a.footage)

@@ -264,7 +264,9 @@ def do_comp(args, shot, masks_dir, solve_json=None):
         return
     if run_ok(cmd, "Stage 5: compositing CG behind the actors",
               timeout=args.stage_timeout):
-        print(f"Composite:       {comp_dir}  (+ preview.mp4)")
+        print(f"Comp elements:   {comp_dir}")
+        print(f"                 bg/ (CG) + fg/ (actor RGBA) + matte/ — in "
+              "Resolve, fg on V2 over bg on V1")
 
 
 def do_render(args, scene_out):
