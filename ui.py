@@ -1727,7 +1727,7 @@ def track():
     # result page (render settings are remembered in the job meta).
     meta = {"footage": footage, "shot": int(f["shot"]), "scene": scene,
             "render": render if scene else "",
-            "engine": f.get("engine", "eevee"),
+            "engine": f.get("engine", "").strip(),
             "samples": f.get("samples", "64"),
             "percent": f.get("percent", "100"),
             "transparent": flag(f.get("transparent")),
@@ -1770,7 +1770,7 @@ def _run_static_place(footage, shot, scene, f):
     render = f.get("render", "").strip().strip('"') or \
         default_render_path(footage, shot)
     meta = {"footage": footage, "shot": shot, "scene": scene,
-            "render": render, "engine": f.get("engine", "eevee"),
+            "render": render, "engine": f.get("engine", "").strip(),
             "samples": f.get("samples", "64"), "percent": f.get("percent", "100"),
             "transparent": flag(f.get("transparent")), "rendered": False,
             "static": True}
@@ -1924,7 +1924,7 @@ def blender_setup_ready():
     prof["scene"] = scene
     rs = d.get("render") or {}
     if rs:
-        prof["engine"] = rs.get("engine", prof.get("engine", "eevee"))
+        prof["engine"] = rs.get("engine", prof.get("engine", "")).strip()
         prof["samples"] = str(rs.get("samples", prof.get("samples", "64")))
         prof["percent"] = str(rs.get("percent", prof.get("percent", "100")))
         prof["transparent"] = bool(rs.get("transparent",
@@ -2795,7 +2795,7 @@ def queue_add():
                     '<a href="javascript:history.back()"><button class="ghost">'
                     'Back</button></a></div></div>')
     static = flag(f.get("static"))
-    engine = f.get("engine", "eevee")
+    engine = f.get("engine", "").strip()
     samples = f.get("samples", "64")
     percent = f.get("percent", "100")
     transparent = flag(f.get("transparent"))
