@@ -219,7 +219,7 @@ def render_landed(render_path):
     return bool(glob.glob(render_path + "_*.png"))
 
 
-def do_comp(args, shot, masks_dir, solve_json=None):
+def do_comp(args, shot, masks_dir, solve_json=None, solve_mode=None):
     """Stage 5: composite the rendered CG behind the actors — the deliverable.
 
     Best-effort by design, like the learned tracker: soft alpha mattes come
@@ -256,8 +256,21 @@ def do_comp(args, shot, masks_dir, solve_json=None):
     # edges (measured at ~400px in the corners on one real solve). The QC
     # step wrote the model next to the track log; no solve dump (static or
     # 2D-flow shots) means no warp, which is correct for those.
-    if solve_json and os.path.exists(solve_json):
+    #
+    # Only warp when the ACCEPTED solve is a real 3D one (perspective/tripod).
+    # A 2D-flow shot renders with a faux flow camera, but its tracked .blend
+    # still holds the rejected 3D reconstruction stage 2 tried — and
+    # dump_solve grabs THAT reconstruction's distortion. Applying a discarded
+    # solve's lens model to a flow render bends the CG edges (visible bowing).
+    # So gate the warp on the accepted mode, not on the mere existence of a
+    # solve dump.
+    warp_ok = solve_mode in ("perspective", "tripod")
+    if solve_json and os.path.exists(solve_json) and warp_ok:
         cmd += ["--solve-json", solve_json]
+    elif solve_json and os.path.exists(solve_json):
+        print(f"[comp] solve mode is {solve_mode or 'none'} — not warping CG "
+              "(the distortion dump belongs to a rejected 3D solve, not the "
+              "camera that rendered)")
     if have_alpha:
         cmd += ["--alpha-dir", alpha_dir]
     elif masks_dir:
@@ -807,7 +820,8 @@ def main():
     # ---- Stage 4: render ----
     do_render(args, scene_out)
     do_comp(args, shot, masks_dir if use_masks else None,
-            solve_json=os.path.join(out_dir, tag + "_qc", "solve.json"))
+            solve_json=os.path.join(out_dir, tag + "_qc", "solve.json"),
+            solve_mode=mode)
 
     print("\n=== DONE ===")
     print(f"Work folder:     {workdir}")
