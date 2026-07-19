@@ -239,7 +239,7 @@ def track_bootstapir(vid_cpu, q, T, dev, offline):
 
     qn = q[0].cpu().numpy()                    # (N,3) = (t, x, y) in W,H px
     N = qn.shape[0]
-    seed_t = max(0, min(T2 - 1, int(round(float(qn[:, 0].min())))))
+    seed_of = np.clip(np.round(qn[:, 0]).astype(int), 0, T2 - 1)
     # into padded-square px, then to 480, in (y, x) order (model convention)
     qy = (qn[:, 2] + pad_y) / sq * IN
     qx = (qn[:, 1] + pad_x) / sq * IN
@@ -248,18 +248,35 @@ def track_bootstapir(vid_cpu, q, T, dev, offline):
     tr = np.zeros((T2, N, 2), np.float32)      # (x, y) in W,H px
     vv = np.zeros((T2, N), bool)
 
-    def sweep(order):
-        tapir.set_points(bgr[seed_t], qpts.copy())   # (re)seed + reset state
-        for f in order:
-            pts, vis = tapir(bgr[f])                  # (N,2) x,y in padded px
-            pts[:, 0] -= pad_x                        # padded-square -> W,H px
-            pts[:, 1] -= pad_y
-            tr[f] = pts
-            vv[f] = vis
+    # Track EACH seed group from ITS OWN frame. The causal model tracks one
+    # direction per pass and only knows the points it was seeded with, so a
+    # point seeded at frame 400 must be set on frame 400 — not lumped onto the
+    # earliest seed (the old bug: it collapsed every seed to frame 0, so
+    # mid-shot seeds tracked garbage). Sweep forward and backward from each
+    # seed, and STOP a direction once the whole group has gone invisible for a
+    # while — no point grinding to frame 769 on tracks that died at 500.
+    LOST_STOP = 20
+    for sf in sorted(set(int(s) for s in seed_of)):
+        idx = np.where(seed_of == sf)[0]
+        gpts = qpts[idx]
 
-    sweep(range(seed_t, T2))                    # forward
-    if seed_t > 0:
-        sweep(range(seed_t, -1, -1))            # backward covers 0..seed_t
+        def sweep(order):
+            tapir.set_points(bgr[sf], gpts.copy())
+            lost = 0
+            for f in order:
+                pts, vis = tapir(bgr[f])
+                pts = pts.reshape(-1, 2).copy()
+                pts[:, 0] -= pad_x
+                pts[:, 1] -= pad_y
+                tr[f, idx] = pts
+                vv[f, idx] = vis.reshape(-1)
+                lost = 0 if vis.reshape(-1).any() else lost + 1
+                if lost >= LOST_STOP:
+                    break
+
+        sweep(range(sf, T2))                    # forward
+        if sf > 0:
+            sweep(range(sf, -1, -1))            # backward
     return tr, vv, T2
 
 
@@ -303,7 +320,18 @@ def main():
     if T > a.max_frames:
         sys.exit(f"shot is {T} frames (> --max-frames {a.max_frames})")
 
-    seed_frames = pick_seed_frames(a.masks, T, W, H, a.seeds)
+    # Seed frames. Default 1: multi-seed improves COVERAGE on long shots (a
+    # single seed's tracks die as the camera moves off them — on shot 08, 769
+    # frames, all gone by frame 232) but consistently HURTS the solve, because
+    # short tracks seeded at different frames don't chain into one accurate
+    # global rotation (measured: shot 08 tripod 2px->105px, shot 10 6px->295px).
+    # The right answer for a long shot no track can span is 2D flow, not more
+    # seeds — and the frame-coverage check in stage 2 now routes such shots
+    # there instead of shipping a solve that freezes the back of the shot.
+    # --seeds >1 stays available (track_bootstapir handles it per-group) for
+    # experimentation.
+    n_seeds = max(1, a.seeds)
+    seed_frames = pick_seed_frames(a.masks, T, W, H, n_seeds)
     m = a.spacing
     ys, xs = np.mgrid[m:H - m:a.spacing, m:W - m:a.spacing]
     pts, seed_of = [], []

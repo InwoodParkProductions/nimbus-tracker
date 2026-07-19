@@ -420,6 +420,22 @@ def _solve_and_finish(clip, ts, mask_stack, settings, stats, fs, fd,
             print(f"[stage2] {label} solve rejected: only {n_solved} "
                   f"contributing tracks (min {min_solved})")
             return None
+        # Frame-coverage check. Reprojection error is computed only over the
+        # frames the solve actually reconstructed — so a solve whose tracks all
+        # die a third of the way in scores a beautiful error on that third and
+        # says NOTHING about the rest, which bakes as a FROZEN camera. This is
+        # exactly the "works for a bit then stops" failure: shot 08's tripod
+        # solved at 2.08px but reconstructed only 232 of 769 frames, and the
+        # back 70% of the shot got a dead camera. A solve must span most of the
+        # shot or it is not usable as one — fall through to 2D flow, which
+        # covers every frame by construction.
+        n_cams = len(rec.cameras) if rec.is_valid else 0
+        min_cov = settings.get("min_frame_coverage", 0.75)
+        if err is not None and n_cams < min_cov * fd:
+            print(f"[stage2] {label} solve rejected: reconstructs only "
+                  f"{n_cams}/{fd} frames ({n_cams / max(1, fd):.0%}) — the "
+                  "rest would freeze; handing the shot to 2D flow")
+            return None
         # Geometry check, on EVERY perspective attempt. Reprojection error
         # only says the solve fits the 2D tracks; it says nothing about
         # whether the 3D structure is real. On a flat backdrop it routinely
