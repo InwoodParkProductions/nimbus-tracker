@@ -1512,6 +1512,18 @@ def track_form():
     pre_engine = prof.get("engine") or st.get("last_engine") or "cycles"
     pre_samples = str(prof.get("samples") or st.get("last_samples", "32"))
     pre_percent = str(prof.get("percent") or st.get("last_percent", "100"))
+    # Resolution as a labeled CHOICE, not a bare % field. The X/Y boxes in
+    # Blender are a trap — stage 3 overwrites them with the plate size (as it
+    # must, for the comp to line up) — so the percentage is the one control
+    # that actually sticks, and nobody finds a bare "%" box. Name the options.
+    _res_opts = [("100", "Full plate (matches footage, e.g. 4K)"),
+                 ("50", "Half — 2K from a 4K plate (recommended)"),
+                 ("25", "Quarter — fast preview")]
+    if pre_percent not in [v for v, _ in _res_opts]:
+        _res_opts.insert(0, (pre_percent, f"Custom ({pre_percent}%)"))
+    percent_options = "".join(
+        f'<option value="{v}"{" selected" if v == pre_percent else ""}>{lab}'
+        f'</option>' for v, lab in _res_opts)
     pre_transparent = bool(prof.get("transparent"))
     have_render = bool(prof.get("engine"))
     is_static = flag(request.args.get("static"))
@@ -1619,7 +1631,7 @@ def track_form():
       {''.join(f'<option{" selected" if e == pre_engine else ""}>{e}</option>'
                for e in ('eevee', 'cycles', 'workbench'))}</select></div>
     <div><label>Samples</label><input type="text" name="samples" value="{pre_samples}"></div>
-    <div><label>Resolution %</label><input type="text" name="percent" value="{pre_percent}"></div>
+    <div><label>Render resolution</label><select name="percent">{percent_options}</select></div>
   </div>
   <p class="hint" style="margin-top:6px">Speed tip: render time scales with
   pixels, not samples — <b>Resolution 50%</b> is about <b>3× faster</b> than
